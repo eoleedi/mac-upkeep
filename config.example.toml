@@ -9,8 +9,7 @@ requires = ["brew"]
 [[tasks]]
 id = "conda"
 name = "Conda"
-command = "conda update conda python --all -y"
-requires = ["conda"]
+command = '''"$HOME/miniforge3/bin/conda" update conda python --all -y'''
 
 [[tasks]]
 id = "ruby"

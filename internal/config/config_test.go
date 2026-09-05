@@ -228,6 +228,13 @@ func TestExampleConfigLoads(t *testing.T) {
 			t.Errorf("Tasks[%d].ID = %q, want %q", i, task.ID, wantIDs[i])
 		}
 	}
+	conda := got.Tasks[1]
+	if conda.Command != `"$HOME/miniforge3/bin/conda" update conda python --all -y` {
+		t.Fatalf("Conda command = %q, want direct Miniforge executable", conda.Command)
+	}
+	if len(conda.Requires) != 0 {
+		t.Fatalf("Conda requirements = %q, want command-local executable path", conda.Requires)
+	}
 }
 
 func writeConfig(t *testing.T, body string) string {
