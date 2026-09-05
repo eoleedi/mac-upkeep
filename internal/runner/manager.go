@@ -108,12 +108,12 @@ func (m *Manager) coordinate(ctx context.Context) {
 		if err := m.checkRequirements(task); err != nil {
 			run.status = Unavailable
 			run.result.Err = err
-			m.emit(Event{TaskID: task.ID, Status: Unavailable, Err: err})
+			m.emit(ctx, Event{TaskID: task.ID, Status: Unavailable, Err: err})
 			continue
 		}
 		run.status = Queued
 		queue = append(queue, run)
-		m.emit(Event{TaskID: task.ID, Status: Queued})
+		m.emit(ctx, Event{TaskID: task.ID, Status: Queued})
 	}
 
 	active := 0
@@ -121,10 +121,12 @@ func (m *Manager) coordinate(ctx context.Context) {
 	startAvailable := func() {
 		for !canceled && ctx.Err() == nil && active < m.limit && len(queue) > 0 {
 			run := queue[0]
+			if !m.emit(ctx, Event{TaskID: run.task.ID, Status: Running}) {
+				return
+			}
 			queue = queue[1:]
 			run.status = Running
 			active++
-			m.emit(Event{TaskID: run.task.ID, Status: Running})
 			go m.execute(ctx, run.task)
 		}
 	}
@@ -139,7 +141,7 @@ func (m *Manager) coordinate(ctx context.Context) {
 				run := runs[command.id]
 				run.result = command.result
 				run.status = terminalStatus(ctx, command.result)
-				m.emit(Event{
+				m.emit(ctx, Event{
 					TaskID:   command.id,
 					Status:   run.status,
 					ExitCode: command.result.ExitCode,
@@ -157,7 +159,7 @@ func (m *Manager) coordinate(ctx context.Context) {
 					command.response <- fmt.Errorf("unknown task %q", command.id)
 					continue
 				}
-				if run.status != Failed {
+				if run.status != Failed && run.status != Canceled {
 					command.response <- fmt.Errorf("task %q is %s", command.id, run.status)
 					continue
 				}
@@ -165,13 +167,13 @@ func (m *Manager) coordinate(ctx context.Context) {
 				if err := m.checkRequirements(run.task); err != nil {
 					run.status = Unavailable
 					run.result.Err = err
-					m.emit(Event{TaskID: run.task.ID, Status: Unavailable, Err: err})
+					m.emit(ctx, Event{TaskID: run.task.ID, Status: Unavailable, Err: err})
 					command.response <- nil
 					continue
 				}
 				run.status = Queued
 				queue = append(queue, run)
-				m.emit(Event{TaskID: run.task.ID, Status: Queued})
+				m.emit(ctx, Event{TaskID: run.task.ID, Status: Queued})
 				startAvailable()
 				command.response <- nil
 			}
@@ -181,7 +183,7 @@ func (m *Manager) coordinate(ctx context.Context) {
 			for _, run := range queue {
 				run.status = Canceled
 				run.result = Result{Err: ctx.Err()}
-				m.emit(Event{TaskID: run.task.ID, Status: Canceled, Err: ctx.Err()})
+				m.emit(ctx, Event{TaskID: run.task.ID, Status: Canceled, Err: ctx.Err()})
 			}
 			queue = nil
 		}
@@ -195,7 +197,7 @@ func (m *Manager) coordinate(ctx context.Context) {
 }
 
 func (m *Manager) execute(ctx context.Context, task Task) {
-	result := m.executor.Run(ctx, task, eventWriter{taskID: task.ID, events: m.events})
+	result := m.executor.Run(ctx, task, eventWriter{ctx: ctx, taskID: task.ID, events: m.events})
 	m.commands <- completion{id: task.ID, result: result}
 }
 
@@ -208,9 +210,9 @@ func (m *Manager) checkRequirements(task Task) error {
 	return nil
 }
 
-func (m *Manager) emit(event Event) {
+func (m *Manager) emit(ctx context.Context, event Event) bool {
 	event.At = time.Now()
-	m.events <- event
+	return sendEvent(ctx, m.events, event)
 }
 
 func terminalStatus(ctx context.Context, result Result) Status {
@@ -224,13 +226,31 @@ func terminalStatus(ctx context.Context, result Result) Status {
 }
 
 type eventWriter struct {
+	ctx    context.Context
 	taskID string
 	events chan<- Event
 }
 
 func (w eventWriter) Write(p []byte) (int, error) {
-	w.events <- Event{TaskID: w.taskID, Output: string(p), At: time.Now()}
+	if !sendEvent(w.ctx, w.events, Event{TaskID: w.taskID, Output: string(p), At: time.Now()}) {
+		return 0, w.ctx.Err()
+	}
 	return len(p), nil
+}
+
+func sendEvent(ctx context.Context, events chan<- Event, event Event) bool {
+	select {
+	case events <- event:
+		return true
+	default:
+	}
+
+	select {
+	case events <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 var _ io.Writer = eventWriter{}

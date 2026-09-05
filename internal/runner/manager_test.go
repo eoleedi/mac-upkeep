@@ -87,6 +87,29 @@ func TestManagerRetryClearsTerminalResultAndRunsAgain(t *testing.T) {
 	assertEvent(t, events, "task-1", Succeeded)
 }
 
+func TestManagerRetryRunsCanceledTaskAgain(t *testing.T) {
+	executor := newBlockingExecutor()
+	manager := NewManager(makeTasks(1), 1, executor, lookupFound)
+	events := manager.Start(context.Background())
+	t.Cleanup(func() {
+		manager.Cancel()
+		manager.Wait()
+	})
+
+	assertEvent(t, events, "task-1", Queued)
+	assertEvent(t, events, "task-1", Running)
+	executor.release("task-1", Result{Err: context.Canceled})
+	assertEvent(t, events, "task-1", Canceled)
+
+	if err := manager.Retry("task-1"); err != nil {
+		t.Fatalf("Retry() error = %v for canceled task", err)
+	}
+	assertEvent(t, events, "task-1", Queued)
+	assertEvent(t, events, "task-1", Running)
+	executor.release("task-1", Result{})
+	assertEvent(t, events, "task-1", Succeeded)
+}
+
 func TestManagerRetryRechecksRequirements(t *testing.T) {
 	executor := newBlockingExecutor()
 	var lookups atomic.Int64
@@ -226,6 +249,37 @@ func TestManagerCancelMarksQueuedTasksCanceledAndCloses(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timed out waiting for manager cancellation")
 		}
+	}
+}
+
+func TestManagerCancelUnblocksEventBackpressure(t *testing.T) {
+	bufferFilled := make(chan struct{})
+	executor := executorFunc(func(_ context.Context, _ Task, output io.Writer) Result {
+		for range eventBufferSize {
+			if _, err := io.WriteString(output, "output"); err != nil {
+				return Result{Err: err}
+			}
+		}
+		close(bufferFilled)
+		_, err := io.WriteString(output, "blocked output")
+		return Result{Err: err}
+	})
+	manager := NewManager(makeTasks(1), 1, executor, lookupFound)
+	events := manager.Start(context.Background())
+	assertEvent(t, events, "task-1", Queued)
+	assertEvent(t, events, "task-1", Running)
+	<-bufferFilled
+
+	manager.Cancel()
+	waited := make(chan struct{})
+	go func() {
+		manager.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return with a full event buffer")
 	}
 }
 
