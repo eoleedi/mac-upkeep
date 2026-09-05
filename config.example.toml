@@ -1,0 +1,49 @@
+concurrency = 3
+
+[[tasks]]
+id = "homebrew"
+name = "Homebrew"
+command = "brew upgrade"
+requires = ["brew"]
+
+[[tasks]]
+id = "conda"
+name = "Conda"
+command = "conda update conda python --all -y"
+requires = ["conda"]
+
+[[tasks]]
+id = "ruby"
+name = "Ruby"
+command = '''latest="$(ruby-install | awk '/^  ruby:/ { found=1; next } /^  [a-z]+:/ { found=0 } found && /^[[:space:]]+[0-9]/ { print $1 }' | tail -1)"; [[ -n "$latest" ]] || { print -u2 "Could not determine latest Ruby version"; exit 1; }; if [[ -d "$HOME/.rubies/ruby-$latest" ]]; then print "Ruby $latest is already installed"; else ruby-install ruby "$latest"; fi'''
+requires = ["ruby-install"]
+
+[[tasks]]
+id = "npm"
+name = "npm"
+command = "npm update -g"
+requires = ["npm"]
+
+[[tasks]]
+id = "mas"
+name = "Mac App Store"
+command = "mas upgrade"
+requires = ["mas"]
+
+[[tasks]]
+id = "poetry"
+name = "Poetry"
+command = "poetry self update"
+requires = ["poetry"]
+
+[[tasks]]
+id = "oh-my-zsh"
+name = "Oh My Zsh"
+command = '''source "$HOME/.zshrc"; upgrade_oh_my_zsh_custom; omz update'''
+requires = ["zsh"]
+
+[[tasks]]
+id = "skills"
+name = "Skills"
+command = "npx skills update -g -y"
+requires = ["npx"]

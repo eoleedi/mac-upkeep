@@ -173,6 +173,29 @@ func TestDefaultPathUsesHomeDirectory(t *testing.T) {
 	}
 }
 
+func TestExampleConfigLoads(t *testing.T) {
+	path := filepath.Join("..", "..", "config.example.toml")
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Concurrency != 3 {
+		t.Fatalf("Concurrency = %d, want 3", got.Concurrency)
+	}
+	if len(got.Tasks) != 8 {
+		t.Fatalf("len(Tasks) = %d, want 8", len(got.Tasks))
+	}
+	wantIDs := []string{"homebrew", "conda", "ruby", "npm", "mas", "poetry", "oh-my-zsh", "skills"}
+	for i, task := range got.Tasks {
+		if !task.Enabled {
+			t.Errorf("Tasks[%d].Enabled = false, want true", i)
+		}
+		if task.ID != wantIDs[i] {
+			t.Errorf("Tasks[%d].ID = %q, want %q", i, task.ID, wantIDs[i])
+		}
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
