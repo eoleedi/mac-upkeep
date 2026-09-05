@@ -6,7 +6,9 @@ import (
 )
 
 type Normalizer struct {
-	pending []byte
+	pending               []byte
+	pendingCarriageReturn bool
+	replacedLine          []byte
 }
 
 func (n *Normalizer) Append(previous, chunk string) string {
@@ -15,6 +17,18 @@ func (n *Normalizer) Append(previous, chunk string) string {
 	input = append(input, chunk...)
 	n.pending = nil
 	output := []byte(previous)
+	if n.pendingCarriageReturn {
+		if len(input) == 0 {
+			return string(output)
+		}
+		n.pendingCarriageReturn = false
+		if input[0] == '\n' {
+			output = append(output, n.replacedLine...)
+			output = append(output, '\n')
+			input = input[1:]
+		}
+		n.replacedLine = nil
+	}
 
 	for len(input) > 0 {
 		switch input[0] {
@@ -29,11 +43,20 @@ func (n *Normalizer) Append(previous, chunk string) string {
 			}
 			input = input[consumed:]
 		case '\r':
-			if newline := bytes.LastIndexByte(output, '\n'); newline >= 0 {
-				output = output[:newline+1]
-			} else {
-				output = output[:0]
+			if len(input) > 1 && input[1] == '\n' {
+				output = append(output, '\n')
+				input = input[2:]
+				continue
 			}
+			lineStart := 0
+			if newline := bytes.LastIndexByte(output, '\n'); newline >= 0 {
+				lineStart = newline + 1
+			}
+			if len(input) == 1 {
+				n.pendingCarriageReturn = true
+				n.replacedLine = append(n.replacedLine[:0], output[lineStart:]...)
+			}
+			output = output[:lineStart]
 			input = input[1:]
 		case '\t', '\n':
 			output = append(output, input[0])

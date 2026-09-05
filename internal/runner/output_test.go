@@ -32,6 +32,23 @@ func TestNormalizerBuffersSplitUTF8AndANSI(t *testing.T) {
 	}
 }
 
+func TestNormalizerTreatsCRLFAsNewline(t *testing.T) {
+	var normalizer Normalizer
+	if got := normalizer.Append("", "first\r\nsecond\r\n"); got != "first\nsecond\n" {
+		t.Fatalf("Append() = %q, want %q", got, "first\nsecond\n")
+	}
+}
+
+func TestNormalizerTreatsSplitCRLFAsNewline(t *testing.T) {
+	var normalizer Normalizer
+	got := normalizer.Append("", "first\r")
+	got = normalizer.Append(got, "\nsecond\r")
+	got = normalizer.Append(got, "\n")
+	if got != "first\nsecond\n" {
+		t.Fatalf("split CRLF output = %q, want %q", got, "first\nsecond\n")
+	}
+}
+
 func TestNormalizerDropsOSCAndUnsafeControls(t *testing.T) {
 	var normalizer Normalizer
 	got := normalizer.Append("", "a\x00b\x1b]0;title\x07c\tline\n")

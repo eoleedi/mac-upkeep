@@ -11,11 +11,12 @@ import (
 )
 
 type ShellExecutor struct {
-	grace time.Duration
+	grace       time.Duration
+	signalGroup func(int, syscall.Signal) error
 }
 
 func NewShellExecutor(grace time.Duration) *ShellExecutor {
-	return &ShellExecutor{grace: grace}
+	return &ShellExecutor{grace: grace, signalGroup: syscall.Kill}
 }
 
 func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Result {
@@ -43,30 +44,52 @@ func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Re
 }
 
 func (e *ShellExecutor) cancel(pid int, waited <-chan error) Result {
-	if err := syscall.Kill(-pid, syscall.SIGTERM); errors.Is(err, syscall.ESRCH) {
+	if err := e.signalGroup(-pid, syscall.SIGTERM); errors.Is(err, syscall.ESRCH) {
 		<-waited
 		return Result{ExitCode: -1, Err: context.Canceled}
 	}
 
 	timer := time.NewTimer(e.grace)
 	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 
 	waitComplete := false
-	select {
-	case <-waited:
-		waitComplete = true
-		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+	waitCh := waited
+	for {
+		select {
+		case <-waitCh:
+			waitComplete = true
+			waitCh = nil
+			if !e.processGroupExists(pid) {
+				return Result{ExitCode: -1, Err: context.Canceled}
+			}
+		case <-ticker.C:
+			if e.processGroupExists(pid) {
+				continue
+			}
+			if !waitComplete {
+				<-waited
+			}
+			return Result{ExitCode: -1, Err: context.Canceled}
+		case <-timer.C:
+			if e.processGroupExists(pid) {
+				_ = e.signalGroup(-pid, syscall.SIGKILL)
+			}
+			if !waitComplete {
+				<-waited
+			}
 			return Result{ExitCode: -1, Err: context.Canceled}
 		}
-		<-timer.C
-	case <-timer.C:
 	}
+}
 
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	if !waitComplete {
-		<-waited
+func (e *ShellExecutor) processGroupExists(pid int) bool {
+	err := e.signalGroup(-pid, 0)
+	if err == nil || errors.Is(err, syscall.EPERM) {
+		return true
 	}
-	return Result{ExitCode: -1, Err: context.Canceled}
+	return !errors.Is(err, syscall.ESRCH)
 }
 
 func resultFromWait(err error) Result {

@@ -129,6 +129,57 @@ wait "$child"
 	}
 }
 
+func TestShellExecutorDoesNotKillExitedProcessGroupAfterGrace(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin process-group integration test")
+	}
+
+	pidFile := t.TempDir() + "/child.pid"
+	childScript := writeScript(t, fmt.Sprintf(`
+trap '' TERM
+printf '%%s' "$$" > %s
+sleep 0.15
+`, shellQuote(pidFile)))
+	script := writeScript(t, fmt.Sprintf(`
+trap 'exit 0' TERM
+%s </dev/null >/dev/null 2>&1 &
+while true; do sleep 0.01 || true; done
+`, shellQuote(childScript)))
+	executor := NewShellExecutor(500 * time.Millisecond)
+	var signalMu sync.Mutex
+	var signals []syscall.Signal
+	executor.signalGroup = func(pid int, signal syscall.Signal) error {
+		signalMu.Lock()
+		signals = append(signals, signal)
+		signalMu.Unlock()
+		return syscall.Kill(pid, signal)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan Result, 1)
+	go func() {
+		resultCh <- executor.Run(ctx, Task{Command: script}, io.Discard)
+	}()
+	waitForPID(t, pidFile)
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		if result.ExitCode != -1 || !errors.Is(result.Err, context.Canceled) {
+			t.Fatalf("result = %#v, want canceled", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after process group exited")
+	}
+	signalMu.Lock()
+	defer signalMu.Unlock()
+	for _, signal := range signals {
+		if signal == syscall.SIGKILL {
+			t.Fatalf("signals = %v, unexpected SIGKILL after process group exit", signals)
+		}
+	}
+}
+
 func TestShellExecutorTreatsCanceledOutputAsCancellation(t *testing.T) {
 	result := NewShellExecutor(time.Second).Run(
 		context.Background(),
@@ -201,7 +252,7 @@ func writeScript(t *testing.T, body string) string {
 
 func waitForPID(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		contents, err := os.ReadFile(path)
 		if err == nil && len(contents) > 0 {
