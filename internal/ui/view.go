@@ -114,14 +114,14 @@ func (m Model) logView() []string {
 func (m Model) helpView() []string {
 	if m.showHelp && m.height >= 16 {
 		return []string{
-			"Overview: j/k select  Enter log  Page Up/Down scroll  r retry",
+			"Overview: j/k select  Enter log  Page Up/Down scroll  c cancel  r retry",
 			"Log: j/k lines  g/G start/end  Esc overview  ? help  q quit",
 		}
 	}
 	if m.focusLog {
 		return []string{"j/k scroll  g/G start/end  Esc overview  ? help  q quit"}
 	}
-	return []string{"j/k select  Enter log  PgUp/PgDn scroll  r retry  ? help  q quit"}
+	return []string{"j/k select  Enter log  PgUp/PgDn scroll  c cancel  r retry  ? help  q quit"}
 }
 
 func (m Model) confirmationView() string {

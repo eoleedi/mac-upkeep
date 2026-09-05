@@ -49,6 +49,23 @@ func TestNormalizerTreatsSplitCRLFAsNewline(t *testing.T) {
 	}
 }
 
+func TestNormalizerFlushPreservesFinalBareCarriageReturnLine(t *testing.T) {
+	var normalizer Normalizer
+	got := normalizer.Append("", "downloaded 100%\r")
+	if got = normalizer.Flush(got); got != "downloaded 100%" {
+		t.Fatalf("Flush() = %q, want %q", got, "downloaded 100%")
+	}
+}
+
+func TestNormalizerFlushDoesNotDuplicateSplitCRLF(t *testing.T) {
+	var normalizer Normalizer
+	got := normalizer.Append("", "first\r")
+	got = normalizer.Append(got, "\nsecond\r\n")
+	if got = normalizer.Flush(got); got != "first\nsecond\n" {
+		t.Fatalf("Flush() = %q, want %q", got, "first\nsecond\n")
+	}
+}
+
 func TestNormalizerDropsOSCAndUnsafeControls(t *testing.T) {
 	var normalizer Normalizer
 	got := normalizer.Append("", "a\x00b\x1b]0;title\x07c\tline\n")

@@ -83,6 +83,17 @@ func (n *Normalizer) Append(previous, chunk string) string {
 	return string(output)
 }
 
+func (n *Normalizer) Flush(previous string) string {
+	output := []byte(previous)
+	if n.pendingCarriageReturn {
+		output = append(output, n.replacedLine...)
+	}
+	n.pending = nil
+	n.pendingCarriageReturn = false
+	n.replacedLine = nil
+	return string(output)
+}
+
 func parseEscape(input []byte) (consumed int, keep, complete bool) {
 	if len(input) == 1 {
 		return 0, false, false

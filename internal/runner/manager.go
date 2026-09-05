@@ -18,6 +18,8 @@ type Manager struct {
 	lookup   LookupFunc
 
 	commands chan any
+	outputs  chan Event
+	statuses chan Event
 	events   chan Event
 	done     chan struct{}
 
@@ -29,6 +31,7 @@ type taskRun struct {
 	task   Task
 	status Status
 	result Result
+	cancel context.CancelFunc
 }
 
 type completion struct {
@@ -41,6 +44,11 @@ type retryRequest struct {
 	response chan error
 }
 
+type cancelTaskRequest struct {
+	id       string
+	response chan error
+}
+
 func NewManager(tasks []Task, limit int, executor Executor, lookup LookupFunc) *Manager {
 	return &Manager{
 		tasks:    append([]Task(nil), tasks...),
@@ -48,6 +56,8 @@ func NewManager(tasks []Task, limit int, executor Executor, lookup LookupFunc) *
 		executor: executor,
 		lookup:   lookup,
 		commands: make(chan any),
+		outputs:  make(chan Event),
+		statuses: make(chan Event),
 		events:   make(chan Event, eventBufferSize),
 		done:     make(chan struct{}),
 	}
@@ -57,9 +67,26 @@ func (m *Manager) Start(parent context.Context) <-chan Event {
 	m.startOnce.Do(func() {
 		ctx, cancel := context.WithCancel(parent)
 		m.cancel = cancel
+		go relayEvents(m.outputs, m.statuses, m.events)
 		go m.coordinate(ctx)
 	})
 	return m.events
+}
+
+func (m *Manager) CancelTask(id string) error {
+	request := cancelTaskRequest{id: id, response: make(chan error, 1)}
+	select {
+	case m.commands <- request:
+	case <-m.done:
+		return errors.New("manager stopped")
+	}
+
+	select {
+	case err := <-request.response:
+		return err
+	case <-m.done:
+		return errors.New("manager stopped")
+	}
 }
 
 func (m *Manager) Retry(id string) error {
@@ -108,12 +135,12 @@ func (m *Manager) coordinate(ctx context.Context) {
 		if err := m.checkRequirements(task); err != nil {
 			run.status = Unavailable
 			run.result.Err = err
-			m.emit(ctx, Event{TaskID: task.ID, Status: Unavailable, Err: err})
+			m.emit(Event{TaskID: task.ID, Status: Unavailable, Err: err})
 			continue
 		}
 		run.status = Queued
 		queue = append(queue, run)
-		m.emit(ctx, Event{TaskID: task.ID, Status: Queued})
+		m.emit(Event{TaskID: task.ID, Status: Queued})
 	}
 
 	active := 0
@@ -121,13 +148,13 @@ func (m *Manager) coordinate(ctx context.Context) {
 	startAvailable := func() {
 		for !canceled && ctx.Err() == nil && active < m.limit && len(queue) > 0 {
 			run := queue[0]
-			if !m.emit(ctx, Event{TaskID: run.task.ID, Status: Running}) {
-				return
-			}
+			m.emit(Event{TaskID: run.task.ID, Status: Running})
 			queue = queue[1:]
 			run.status = Running
 			active++
-			go m.execute(ctx, run.task)
+			runCtx, cancel := context.WithCancel(ctx)
+			run.cancel = cancel
+			go m.execute(runCtx, run.task)
 		}
 	}
 	startAvailable()
@@ -139,9 +166,11 @@ func (m *Manager) coordinate(ctx context.Context) {
 			switch command := message.(type) {
 			case completion:
 				run := runs[command.id]
+				run.cancel()
+				run.cancel = nil
 				run.result = command.result
 				run.status = terminalStatus(ctx, command.result)
-				m.emit(ctx, Event{
+				m.emit(Event{
 					TaskID:   command.id,
 					Status:   run.status,
 					ExitCode: command.result.ExitCode,
@@ -149,6 +178,18 @@ func (m *Manager) coordinate(ctx context.Context) {
 				})
 				active--
 				startAvailable()
+			case cancelTaskRequest:
+				run, ok := runs[command.id]
+				if !ok {
+					command.response <- fmt.Errorf("unknown task %q", command.id)
+					continue
+				}
+				if run.status != Running || run.cancel == nil {
+					command.response <- fmt.Errorf("task %q is %s", command.id, run.status)
+					continue
+				}
+				run.cancel()
+				command.response <- nil
 			case retryRequest:
 				if canceled || ctx.Err() != nil {
 					command.response <- errors.New("manager canceled")
@@ -165,11 +206,11 @@ func (m *Manager) coordinate(ctx context.Context) {
 				}
 				run.result = Result{}
 				run.status = Queued
-				m.emit(ctx, Event{TaskID: run.task.ID, Status: Queued})
+				m.emit(Event{TaskID: run.task.ID, Status: Queued})
 				if err := m.checkRequirements(run.task); err != nil {
 					run.status = Unavailable
 					run.result.Err = err
-					m.emit(ctx, Event{TaskID: run.task.ID, Status: Unavailable, Err: err})
+					m.emit(Event{TaskID: run.task.ID, Status: Unavailable, Err: err})
 					command.response <- nil
 					continue
 				}
@@ -183,13 +224,14 @@ func (m *Manager) coordinate(ctx context.Context) {
 			for _, run := range queue {
 				run.status = Canceled
 				run.result = Result{Err: ctx.Err()}
-				m.emit(ctx, Event{TaskID: run.task.ID, Status: Canceled, Err: ctx.Err()})
+				m.emit(Event{TaskID: run.task.ID, Status: Canceled, Err: ctx.Err()})
 			}
 			queue = nil
 		}
 
 		if canceled && active == 0 {
-			close(m.events)
+			close(m.outputs)
+			close(m.statuses)
 			close(m.done)
 			return
 		}
@@ -197,7 +239,7 @@ func (m *Manager) coordinate(ctx context.Context) {
 }
 
 func (m *Manager) execute(ctx context.Context, task Task) {
-	result := m.executor.Run(ctx, task, eventWriter{ctx: ctx, taskID: task.ID, events: m.events})
+	result := m.executor.Run(ctx, task, eventWriter{ctx: ctx, taskID: task.ID, events: m.outputs})
 	m.commands <- completion{id: task.ID, result: result}
 }
 
@@ -210,9 +252,9 @@ func (m *Manager) checkRequirements(task Task) error {
 	return nil
 }
 
-func (m *Manager) emit(ctx context.Context, event Event) bool {
+func (m *Manager) emit(event Event) {
 	event.At = time.Now()
-	return sendEvent(ctx, m.events, event)
+	m.statuses <- event
 }
 
 func terminalStatus(ctx context.Context, result Result) Status {
@@ -242,14 +284,44 @@ func sendEvent(ctx context.Context, events chan<- Event, event Event) bool {
 	select {
 	case events <- event:
 		return true
-	default:
-	}
-
-	select {
-	case events <- event:
-		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+func relayEvents(outputs, statuses <-chan Event, events chan<- Event) {
+	// Statuses bypass output backpressure. Wait reports process cleanup complete;
+	// the public stream closes after a consumer drains every accepted event.
+	defer close(events)
+	queue := make([]Event, 0, eventBufferSize)
+	for outputs != nil || statuses != nil || len(queue) > 0 {
+		var output <-chan Event
+		if len(queue) < eventBufferSize {
+			output = outputs
+		}
+		var destination chan<- Event
+		var next Event
+		if len(queue) > 0 {
+			destination = events
+			next = queue[0]
+		}
+
+		select {
+		case event, ok := <-output:
+			if !ok {
+				outputs = nil
+			} else {
+				queue = append(queue, event)
+			}
+		case event, ok := <-statuses:
+			if !ok {
+				statuses = nil
+			} else {
+				queue = append(queue, event)
+			}
+		case destination <- next:
+			queue = queue[1:]
+		}
 	}
 }
 

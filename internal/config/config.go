@@ -86,12 +86,17 @@ func Load(path string) (Config, error) {
 		}
 
 		requirements := make(map[string]struct{}, len(rawTask.Requires))
+		normalizedRequirements := make([]string, 0, len(rawTask.Requires))
 		for _, requirement := range rawTask.Requires {
 			requirement = strings.TrimSpace(requirement)
+			if requirement == "" {
+				return Config{}, taskError(path, i, "requires", "must not contain an empty requirement")
+			}
 			if _, exists := requirements[requirement]; exists {
 				return Config{}, taskError(path, i, "requires", fmt.Sprintf("duplicate requirement %q", requirement))
 			}
 			requirements[requirement] = struct{}{}
+			normalizedRequirements = append(normalizedRequirements, requirement)
 		}
 
 		enabled := true
@@ -103,7 +108,7 @@ func Load(path string) (Config, error) {
 			Name:     rawTask.Name,
 			Command:  rawTask.Command,
 			Enabled:  enabled,
-			Requires: rawTask.Requires,
+			Requires: normalizedRequirements,
 		})
 	}
 

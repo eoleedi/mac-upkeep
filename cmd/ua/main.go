@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,7 +19,14 @@ import (
 	"github.com/eoleedi/ua/internal/ui"
 )
 
-type launchFunc func(ctx context.Context, model ui.Model, output io.Writer) (ui.Model, error)
+type launchFunc func(ctx context.Context, model ui.Model, output io.Writer, cleanup func()) (ui.Model, error)
+
+var terminationSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
+const (
+	enterAltScreen = "\x1b[?1049h"
+	exitAltScreen  = "\x1b[?1049l"
+)
 
 type managerController struct {
 	manager *runner.Manager
@@ -26,6 +34,10 @@ type managerController struct {
 
 func (c managerController) Retry(id string) error {
 	return c.manager.Retry(id)
+}
+
+func (c managerController) CancelTask(id string) error {
+	return c.manager.CancelTask(id)
 }
 
 func (c managerController) Cancel() {
@@ -41,7 +53,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return runWithLauncher(args, stdout, stderr, launchProgram)
 }
 
-func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc) int {
+func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc) (exitCode int) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			fmt.Fprintf(stderr, "ua: UI panic: %v\n", recovered)
+			exitCode = 2
+		}
+	}()
 	flags := flag.NewFlagSet("ua", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to configuration file")
@@ -84,12 +102,16 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 	manager := runner.NewManager(tasks, loaded.Concurrency, runner.NewShellExecutor(2*time.Second), exec.LookPath)
 	ctx := context.Background()
 	events := manager.Start(ctx)
-	defer func() {
-		manager.Cancel()
-		manager.Wait()
-	}()
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			manager.Cancel()
+			manager.Wait()
+		})
+	}
+	defer cleanup()
 	model := ui.New(tasks, managerController{manager: manager}, events)
-	finalModel, launchErr := launch(ctx, model, stdout)
+	finalModel, launchErr := launch(ctx, model, stdout, cleanup)
 	if launchErr != nil {
 		fmt.Fprintf(stderr, "ua: %v\n", launchErr)
 		return 2
@@ -97,17 +119,19 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 	return finalModel.ExitCode()
 }
 
-func launchProgram(ctx context.Context, model ui.Model, output io.Writer) (ui.Model, error) {
-	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGHUP)
+func launchProgram(ctx context.Context, model ui.Model, output io.Writer, cleanup func()) (ui.Model, error) {
+	signalCtx, stop := signal.NotifyContext(ctx, terminationSignals...)
 	defer stop()
 
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithOutput(output))
+	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithoutSignalHandler())
 	finished := make(chan struct{})
 	bridgeDone := bridgeTermination(signalCtx, finished, program.Send)
+	defer func() {
+		close(finished)
+		<-bridgeDone
+	}()
 
-	result, err := program.Run()
-	close(finished)
-	<-bridgeDone
+	result, err := runManagedScreen(output, cleanup, program.Run)
 	if err != nil {
 		return model, err
 	}
@@ -116,6 +140,13 @@ func launchProgram(ctx context.Context, model ui.Model, output io.Writer) (ui.Mo
 		return model, fmt.Errorf("ui returned %T, want ui.Model", result)
 	}
 	return finalModel, nil
+}
+
+func runManagedScreen(output io.Writer, cleanup func(), run func() (tea.Model, error)) (tea.Model, error) {
+	defer func() { _, _ = io.WriteString(output, exitAltScreen) }()
+	defer cleanup()
+	_, _ = io.WriteString(output, enterAltScreen)
+	return run()
 }
 
 func bridgeTermination(ctx context.Context, finished <-chan struct{}, send func(tea.Msg)) <-chan struct{} {

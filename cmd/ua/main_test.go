@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ func TestMissingConfigReturnsStartupErrorWithoutLaunching(t *testing.T) {
 			t.Setenv("HOME", home)
 			launched := false
 			var stderr bytes.Buffer
-			code := runWithLauncher(test.args(home), io.Discard, &stderr, func(context.Context, ui.Model, io.Writer) (ui.Model, error) {
+			code := runWithLauncher(test.args(home), io.Discard, &stderr, func(context.Context, ui.Model, io.Writer, func()) (ui.Model, error) {
 				launched = true
 				return ui.Model{}, nil
 			})
@@ -62,7 +63,7 @@ func TestMalformedConfigDoesNotLaunch(t *testing.T) {
 	launched := false
 	var stderr bytes.Buffer
 
-	code := runWithLauncher([]string{"--config", path}, io.Discard, &stderr, func(context.Context, ui.Model, io.Writer) (ui.Model, error) {
+	code := runWithLauncher([]string{"--config", path}, io.Discard, &stderr, func(context.Context, ui.Model, io.Writer, func()) (ui.Model, error) {
 		launched = true
 		return ui.Model{}, nil
 	})
@@ -95,7 +96,7 @@ enabled = false
 `)
 	launched := false
 
-	code := runWithLauncher([]string{"--config", path}, io.Discard, io.Discard, func(_ context.Context, model ui.Model, _ io.Writer) (ui.Model, error) {
+	code := runWithLauncher([]string{"--config", path}, io.Discard, io.Discard, func(_ context.Context, model ui.Model, _ io.Writer, _ func()) (ui.Model, error) {
 		launched = true
 		view := model.View()
 		if !strings.Contains(view, "Chosen task") || strings.Contains(view, "Disabled task") {
@@ -126,7 +127,7 @@ command = %q
 `, command))
 	var stderr bytes.Buffer
 
-	code := runWithLauncher([]string{"--config", path}, io.Discard, &stderr, func(context.Context, ui.Model, io.Writer) (ui.Model, error) {
+	code := runWithLauncher([]string{"--config", path}, io.Discard, &stderr, func(context.Context, ui.Model, io.Writer, func()) (ui.Model, error) {
 		waitForFile(t, started)
 		return ui.Model{}, errors.New("terminal unavailable")
 	})
@@ -156,10 +157,12 @@ command = %q
 `, command))
 	cleanupFinishedBeforeReturn := false
 
-	code := runWithLauncher([]string{"--config", path}, io.Discard, io.Discard, func(_ context.Context, model ui.Model, _ io.Writer) (ui.Model, error) {
+	code := runWithLauncher([]string{"--config", path}, io.Discard, io.Discard, func(_ context.Context, model ui.Model, _ io.Writer, _ func()) (ui.Model, error) {
 		waitForFile(t, started)
 		updated, cmd := model.Update(ui.TerminateMsg{})
-		assertTeaQuit(t, cmd)
+		if _, quitting := cmd().(tea.QuitMsg); quitting {
+			t.Fatal("termination quit before asynchronous cleanup")
+		}
 		_, err := os.Stat(stopped)
 		cleanupFinishedBeforeReturn = err == nil
 		return updated.(ui.Model), nil
@@ -193,13 +196,84 @@ id = "task"
 name = "Task"
 command = "printf ok"
 `)
-			code := runWithLauncher([]string{"--config", path}, io.Discard, io.Discard, func(_ context.Context, model ui.Model, _ io.Writer) (ui.Model, error) {
+			code := runWithLauncher([]string{"--config", path}, io.Discard, io.Discard, func(_ context.Context, model ui.Model, _ io.Writer, _ func()) (ui.Model, error) {
 				return updateTaskStatus(t, model, "task", test.status), nil
 			})
 			if code != test.want {
 				t.Fatalf("exit code = %d, want %d", code, test.want)
 			}
 		})
+	}
+}
+
+func TestRunRecoversLauncherPanicAfterManagerCleanup(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	stopped := filepath.Join(dir, "stopped")
+	command := fmt.Sprintf("printf started > %q; trap 'printf stopped > %q; exit 0' TERM; while true; do sleep 0.01; done", started, stopped)
+	path := writeCommandConfig(t, fmt.Sprintf(`
+concurrency = 1
+[[tasks]]
+id = "blocking"
+name = "Blocking task"
+command = %q
+`, command))
+	var stderr bytes.Buffer
+
+	code := runWithLauncher([]string{"--config", path}, io.Discard, &stderr, func(context.Context, ui.Model, io.Writer, func()) (ui.Model, error) {
+		waitForFile(t, started)
+		panic("render failed")
+	})
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if _, err := os.Stat(stopped); err != nil {
+		t.Fatalf("manager process was not cleaned up after panic: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "UI panic: render failed") {
+		t.Fatalf("stderr = %q, want recovered panic", stderr.String())
+	}
+}
+
+func TestManagedScreenCleansUpBeforeRestoringAlternateScreen(t *testing.T) {
+	var output bytes.Buffer
+	_, err := runManagedScreen(&output, func() { output.WriteString("cleanup") }, func() (tea.Model, error) {
+		return nil, errors.New("run failed")
+	})
+	if err == nil {
+		t.Fatal("runManagedScreen() error = nil")
+	}
+	if got, want := output.String(), enterAltScreen+"cleanup"+exitAltScreen; got != want {
+		t.Fatalf("screen lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestManagedScreenCleansUpBeforeRestoringAfterPanic(t *testing.T) {
+	var output bytes.Buffer
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("runManagedScreen did not propagate panic")
+			}
+		}()
+		_, _ = runManagedScreen(&output, func() { output.WriteString("cleanup") }, func() (tea.Model, error) {
+			panic("render failed")
+		})
+	}()
+	if got, want := output.String(), enterAltScreen+"cleanup"+exitAltScreen; got != want {
+		t.Fatalf("panic screen lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestTerminationSignalsIncludeInterruptTermAndHangup(t *testing.T) {
+	for _, want := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
+		found := false
+		for _, signal := range terminationSignals {
+			found = found || signal == want
+		}
+		if !found {
+			t.Fatalf("termination signals %v missing %v", terminationSignals, want)
+		}
 	}
 }
 

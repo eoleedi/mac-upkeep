@@ -2,9 +2,12 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,6 +111,54 @@ func TestManagerRetryRunsCanceledTaskAgain(t *testing.T) {
 	assertEvent(t, events, "task-1", Running)
 	executor.release("task-1", Result{})
 	assertEvent(t, events, "task-1", Succeeded)
+}
+
+func TestManagerCancelTaskWithShellExecutorThenRetry(t *testing.T) {
+	dir := t.TempDir()
+	firstRun := filepath.Join(dir, "first-run")
+	command := fmt.Sprintf(`if [[ ! -e %q ]]; then touch %q; trap 'exit 0' TERM; while true; do sleep 0.01; done; else printf retried; fi`, firstRun, firstRun)
+	manager := NewManager([]Task{{ID: "task-1", Command: command}}, 1, NewShellExecutor(100*time.Millisecond), lookupFound)
+	events := manager.Start(context.Background())
+	t.Cleanup(func() {
+		manager.Cancel()
+		manager.Wait()
+	})
+
+	assertEvent(t, events, "task-1", Queued)
+	assertEvent(t, events, "task-1", Running)
+	waitForPath(t, firstRun)
+	if err := manager.CancelTask("task-1"); err != nil {
+		t.Fatalf("CancelTask() error = %v", err)
+	}
+	assertEvent(t, events, "task-1", Canceled)
+	if err := manager.Retry("task-1"); err != nil {
+		t.Fatalf("Retry() error = %v", err)
+	}
+	assertEvent(t, events, "task-1", Queued)
+	assertEvent(t, events, "task-1", Running)
+	output := assertEvent(t, events, "task-1", "")
+	if output.Output != "retried" {
+		t.Fatalf("retry output = %q, want retried", output.Output)
+	}
+	assertEvent(t, events, "task-1", Succeeded)
+}
+
+func TestManagerCancelTaskRejectsNonRunningTasks(t *testing.T) {
+	executor := newBlockingExecutor()
+	manager := NewManager(makeTasks(2), 1, executor, lookupFound)
+	events := manager.Start(context.Background())
+	t.Cleanup(func() {
+		manager.Cancel()
+		manager.Wait()
+	})
+	assertEvent(t, events, "task-1", Queued)
+	assertEvent(t, events, "task-2", Queued)
+	assertEvent(t, events, "task-1", Running)
+	for _, id := range []string{"task-2", "missing"} {
+		if err := manager.CancelTask(id); err == nil {
+			t.Fatalf("CancelTask(%q) error = nil", id)
+		}
+	}
 }
 
 func TestManagerRetryRechecksRequirements(t *testing.T) {
@@ -290,6 +341,36 @@ func TestManagerCancelUnblocksEventBackpressure(t *testing.T) {
 	}
 }
 
+func TestManagerCancellationPreservesTerminalEventWithSaturatedOutput(t *testing.T) {
+	filled := make(chan struct{})
+	executor := executorFunc(func(ctx context.Context, _ Task, output io.Writer) Result {
+		for range eventBufferSize + 1 {
+			if _, err := io.WriteString(output, "output"); err != nil {
+				close(filled)
+				return Result{Err: err}
+			}
+		}
+		close(filled)
+		<-ctx.Done()
+		return Result{Err: ctx.Err()}
+	})
+	manager := NewManager(makeTasks(1), 1, executor, lookupFound)
+	events := manager.Start(context.Background())
+	assertEvent(t, events, "task-1", Queued)
+	assertEvent(t, events, "task-1", Running)
+	<-filled
+
+	manager.Cancel()
+	manager.Wait()
+	foundCanceled := false
+	for event := range events {
+		foundCanceled = foundCanceled || event.Status == Canceled
+	}
+	if !foundCanceled {
+		t.Fatal("terminal canceled event was dropped under output backpressure")
+	}
+}
+
 func TestManagerForwardsExecutorOutput(t *testing.T) {
 	executor := executorFunc(func(_ context.Context, _ Task, output io.Writer) Result {
 		_, _ = io.WriteString(output, "updating\n")
@@ -408,4 +489,18 @@ func assertNoEvent(t *testing.T, events <-chan Event) {
 		t.Fatalf("unexpected event before executor release: %#v", event)
 	case <-time.After(25 * time.Millisecond):
 	}
+}
+
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }

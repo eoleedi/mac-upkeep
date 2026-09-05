@@ -14,14 +14,21 @@ import (
 )
 
 type fakeController struct {
-	retries  []string
-	retryErr error
-	cancels  int
+	retries       []string
+	retryErr      error
+	canceledTasks []string
+	cancelTaskErr error
+	cancels       int
 }
 
 func (c *fakeController) Retry(id string) error {
 	c.retries = append(c.retries, id)
 	return c.retryErr
+}
+
+func (c *fakeController) CancelTask(id string) error {
+	c.canceledTasks = append(c.canceledTasks, id)
+	return c.cancelTaskErr
 }
 
 func (c *fakeController) Cancel() { c.cancels++ }
@@ -38,7 +45,21 @@ func (c *blockingController) Retry(id string) error {
 	return c.err
 }
 
+func (c *blockingController) CancelTask(string) error { return nil }
+
 func (c *blockingController) Cancel() {}
+
+type blockingCleanupController struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingCleanupController) Retry(string) error      { return nil }
+func (c *blockingCleanupController) CancelTask(string) error { return nil }
+func (c *blockingCleanupController) Cancel() {
+	close(c.started)
+	<-c.release
+}
 
 func newTestModel(t *testing.T, tasks []runner.Task) Model {
 	t.Helper()
@@ -263,6 +284,26 @@ func TestRetryErrorIsVisible(t *testing.T) {
 	}
 }
 
+func TestCancelKeyOnlyDispatchesForSelectedRunningTask(t *testing.T) {
+	controller := &fakeController{}
+	model := New([]runner.Task{{ID: "a", Name: "Alpha"}, {ID: "b", Name: "Beta"}}, controller, make(chan runner.Event, 1))
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Running})
+	model = updateModel(t, model, runner.Event{TaskID: "b", Status: runner.Queued})
+
+	model, cmd := pressWithCommand(t, model, "c")
+	if cmd == nil {
+		t.Fatal("running task cancel did not return an asynchronous command")
+	}
+	model = updateModel(t, model, cmd())
+	if len(controller.canceledTasks) != 1 || controller.canceledTasks[0] != "a" {
+		t.Fatalf("canceled tasks = %#v, want [a]", controller.canceledTasks)
+	}
+	model = press(t, model, "down")
+	if _, cmd = pressWithCommand(t, model, "c"); cmd != nil {
+		t.Fatal("queued selected task produced cancel command")
+	}
+}
+
 func TestBlockingRetryDoesNotBlockUpdateAndReturnsTaskScopedResult(t *testing.T) {
 	controller := &blockingController{
 		started: make(chan string, 1),
@@ -452,9 +493,18 @@ func TestConfirmationPrecedesGlobalKeysAndCanCancel(t *testing.T) {
 		t.Fatal("global help key bypassed confirmation")
 	}
 	model, cmd := pressWithCommand(t, model, "y")
-	if controller.cancels != 1 || !model.canceled {
-		t.Fatal("confirmed quit did not cancel the controller")
+	if controller.cancels != 0 || !model.canceled {
+		t.Fatal("confirmed quit blocked Update or was not recorded")
 	}
+	cleanupMsg := cmd()
+	if _, quitting := cleanupMsg.(tea.QuitMsg); quitting {
+		t.Fatal("confirmed quit returned tea.Quit before cleanup")
+	}
+	model, _ = updateWithCommand(t, model, cleanupMsg)
+	if controller.cancels != 1 {
+		t.Fatal("cleanup command did not cancel the controller")
+	}
+	model, cmd = updateWithCommand(t, model, eventChannelClosedMsg{})
 	assertQuit(t, cmd)
 }
 
@@ -464,9 +514,12 @@ func TestSecondInterruptForcesCancellation(t *testing.T) {
 	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Running})
 	model = press(t, model, "ctrl+c")
 	model, cmd := pressWithCommand(t, model, "ctrl+c")
-	if controller.cancels != 1 || !model.CanceledByUser() {
+	if controller.cancels != 0 || !model.CanceledByUser() {
 		t.Fatal("second interrupt did not force cancellation")
 	}
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Canceled})
+	model, _ = updateWithCommand(t, model, cmd())
+	model, cmd = updateWithCommand(t, model, eventChannelClosedMsg{})
 	assertQuit(t, cmd)
 }
 
@@ -474,10 +527,43 @@ func TestTerminateMsgCancelsImmediately(t *testing.T) {
 	controller := &fakeController{}
 	model := New([]runner.Task{{ID: "a", Name: "Alpha"}}, controller, make(chan runner.Event, 1))
 	model, cmd := updateWithCommand(t, model, TerminateMsg{})
-	if controller.cancels != 1 || model.CanceledByUser() {
+	if controller.cancels != 0 || model.CanceledByUser() {
 		t.Fatal("termination did not cancel immediately or was marked as user cancellation")
 	}
+	model, _ = updateWithCommand(t, model, cmd())
+	model, cmd = updateWithCommand(t, model, eventChannelClosedMsg{})
 	assertQuit(t, cmd)
+}
+
+func TestCleanupCommandLeavesEventLoopFreeToDrainTerminalEvents(t *testing.T) {
+	controller := &blockingCleanupController{started: make(chan struct{}), release: make(chan struct{})}
+	model := New([]runner.Task{{ID: "a", Name: "Alpha"}}, controller, make(chan runner.Event, 1))
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Running})
+	model, cleanupCmd := updateWithCommand(t, model, TerminateMsg{})
+	cleanupResult := make(chan tea.Msg, 1)
+	go func() { cleanupResult <- cleanupCmd() }()
+	<-controller.started
+
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Canceled})
+	if model.tasks[0].Status != runner.Canceled {
+		t.Fatal("event loop did not apply terminal event while cleanup was blocked")
+	}
+	close(controller.release)
+	model, cmd := updateWithCommand(t, model, <-cleanupResult)
+	if cmd != nil {
+		t.Fatal("cleanup completion quit before the event stream closed")
+	}
+	_, cmd = updateWithCommand(t, model, eventChannelClosedMsg{})
+	assertQuit(t, cmd)
+}
+
+func TestTerminalStatusFlushesFinalBareCarriageReturn(t *testing.T) {
+	model := newTestModel(t, []runner.Task{{ID: "a", Name: "Alpha"}})
+	model = updateModel(t, model, runner.Event{TaskID: "a", Output: "complete\r"})
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Succeeded})
+	if model.tasks[0].Log != "complete" {
+		t.Fatalf("terminal log = %q, want complete", model.tasks[0].Log)
+	}
 }
 
 func TestQuitWithoutConfirmationAfterCompletionAndExitCode(t *testing.T) {

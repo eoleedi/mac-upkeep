@@ -11,6 +11,7 @@ import (
 
 type Controller interface {
 	Retry(id string) error
+	CancelTask(id string) error
 	Cancel()
 }
 
@@ -27,6 +28,13 @@ type retryResultMsg struct {
 	err    error
 }
 
+type cancelTaskResultMsg struct {
+	taskID string
+	err    error
+}
+
+type cleanupCompleteMsg struct{}
+
 type taskView struct {
 	Task       runner.Task
 	Status     runner.Status
@@ -40,20 +48,22 @@ type taskView struct {
 }
 
 type Model struct {
-	tasks          []taskView
-	selected       int
-	viewport       viewport.Model
-	focusLog       bool
-	showHelp       bool
-	confirmingQuit bool
-	canceled       bool
-	followLog      bool
-	width          int
-	height         int
-	controller     Controller
-	events         <-chan runner.Event
-	now            time.Time
-	tickScheduled  bool
+	tasks           []taskView
+	selected        int
+	viewport        viewport.Model
+	focusLog        bool
+	showHelp        bool
+	confirmingQuit  bool
+	canceled        bool
+	shuttingDown    bool
+	cleanupComplete bool
+	followLog       bool
+	width           int
+	height          int
+	controller      Controller
+	events          <-chan runner.Event
+	now             time.Time
+	tickScheduled   bool
 }
 
 func New(tasks []runner.Task, controller Controller, events <-chan runner.Event) Model {
@@ -82,8 +92,7 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case TerminateMsg:
-		m.controller.Cancel()
-		return m, tea.Quit
+		return m, m.beginShutdown(false)
 	case runner.Event:
 		wasActive := m.hasActiveTasks()
 		m.applyEvent(msg)
@@ -96,9 +105,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case retryResultMsg:
 		m.applyRetryResult(msg)
 		return m, nil
+	case cancelTaskResultMsg:
+		m.applyTaskActionResult(msg.taskID, msg.err)
+		return m, nil
+	case cleanupCompleteMsg:
+		m.cleanupComplete = true
+		return m, m.quitAfterCleanup()
 	case eventChannelClosedMsg:
 		m.events = nil
-		return m, nil
+		return m, m.quitAfterCleanup()
 	case tickMsg:
 		m.now = msg.at
 		m.tickScheduled = false
@@ -136,16 +151,15 @@ func (m Model) CanceledByUser() bool {
 
 func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	if m.shuttingDown {
+		return m, nil
+	}
 	if m.confirmingQuit {
 		switch key {
 		case "y":
-			m.controller.Cancel()
-			m.canceled = true
-			return m, tea.Quit
+			return m, m.beginShutdown(true)
 		case "q", "ctrl+c":
-			m.controller.Cancel()
-			m.canceled = true
-			return m, tea.Quit
+			return m, m.beginShutdown(true)
 		case "n", "esc":
 			m.confirmingQuit = false
 		}
@@ -165,6 +179,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		return m, m.retrySelected()
+	case "c":
+		return m, m.cancelSelected()
 	case "pgup":
 		m.viewport.PageUp()
 		m.followLog = false
@@ -228,6 +244,9 @@ func (m *Model) applyEvent(event runner.Event) {
 			task.Log = task.Normalizer.Append(task.Log, event.Output)
 		}
 		if event.Status != "" {
+			if terminal(event.Status) {
+				task.Log = task.Normalizer.Flush(task.Log)
+			}
 			task.Status = event.Status
 			task.ExitCode = event.ExitCode
 			task.Err = event.Err
@@ -285,12 +304,47 @@ func (m *Model) retrySelected() tea.Cmd {
 }
 
 func (m *Model) applyRetryResult(result retryResultMsg) {
+	m.applyTaskActionResult(result.taskID, result.err)
+}
+
+func (m *Model) applyTaskActionResult(taskID string, err error) {
 	for i := range m.tasks {
-		if m.tasks[i].Task.ID == result.taskID {
-			m.tasks[i].RetryErr = result.err
+		if m.tasks[i].Task.ID == taskID {
+			m.tasks[i].RetryErr = err
 			return
 		}
 	}
+}
+
+func (m *Model) cancelSelected() tea.Cmd {
+	if len(m.tasks) == 0 || m.tasks[m.selected].Status != runner.Running {
+		return nil
+	}
+	m.tasks[m.selected].RetryErr = nil
+	taskID := m.tasks[m.selected].Task.ID
+	return func() tea.Msg {
+		return cancelTaskResultMsg{taskID: taskID, err: m.controller.CancelTask(taskID)}
+	}
+}
+
+func (m *Model) beginShutdown(canceledByUser bool) tea.Cmd {
+	if m.shuttingDown {
+		return nil
+	}
+	m.confirmingQuit = false
+	m.canceled = canceledByUser
+	m.shuttingDown = true
+	return func() tea.Msg {
+		m.controller.Cancel()
+		return cleanupCompleteMsg{}
+	}
+}
+
+func (m Model) quitAfterCleanup() tea.Cmd {
+	if m.shuttingDown && m.cleanupComplete && m.events == nil {
+		return tea.Quit
+	}
+	return nil
 }
 
 func (m Model) hasActiveTasks() bool {

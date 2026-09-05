@@ -57,6 +57,24 @@ requires = ["brew", "git"]
 	}
 }
 
+func TestLoadTrimsRequirementsBeforeStoring(t *testing.T) {
+	path := writeConfig(t, `
+[[tasks]]
+id = "brew"
+name = "Homebrew"
+command = "brew upgrade"
+requires = ["  brew  ", "git"]
+`)
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got.Tasks[0].Requires, ",") != "brew,git" {
+		t.Fatalf("Requires = %#v, want trimmed values", got.Tasks[0].Requires)
+	}
+}
+
 func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 	tests := map[string]struct {
 		body      string
@@ -119,6 +137,22 @@ id = "brew"
 name = "Homebrew"
 command = "brew upgrade"
 requires = ["brew", "brew"]`,
+			wantError: "tasks[0].requires",
+		},
+		"empty requirement": {
+			body: `[[tasks]]
+id = "brew"
+name = "Homebrew"
+command = "brew upgrade"
+requires = ["   "]`,
+			wantError: "tasks[0].requires",
+		},
+		"duplicate requirements after trimming": {
+			body: `[[tasks]]
+id = "brew"
+name = "Homebrew"
+command = "brew upgrade"
+requires = ["brew", " brew "]`,
 			wantError: "tasks[0].requires",
 		},
 		"unknown key": {
