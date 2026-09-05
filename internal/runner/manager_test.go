@@ -111,7 +111,11 @@ func TestManagerRetryRunsCanceledTaskAgain(t *testing.T) {
 }
 
 func TestManagerRetryRechecksRequirements(t *testing.T) {
-	executor := newBlockingExecutor()
+	var calls atomic.Int64
+	executor := executorFunc(func(context.Context, Task, io.Writer) Result {
+		calls.Add(1)
+		return Result{ExitCode: 1}
+	})
 	var lookups atomic.Int64
 	lookup := func(string) (string, error) {
 		if lookups.Add(1) == 1 {
@@ -128,14 +132,17 @@ func TestManagerRetryRechecksRequirements(t *testing.T) {
 
 	assertEvent(t, events, "task-1", Queued)
 	assertEvent(t, events, "task-1", Running)
-	executor.release("task-1", Result{ExitCode: 1})
 	assertEvent(t, events, "task-1", Failed)
 	if err := manager.Retry("task-1"); err != nil {
 		t.Fatalf("Retry() error = %v", err)
 	}
+	assertEvent(t, events, "task-1", Queued)
 	event := assertEvent(t, events, "task-1", Unavailable)
 	if event.Err == nil || !strings.Contains(event.Err.Error(), "tool") {
 		t.Fatalf("unavailable error = %v, want requirement name", event.Err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("executor calls = %d, want 1", got)
 	}
 }
 

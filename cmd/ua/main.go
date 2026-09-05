@@ -20,6 +20,19 @@ import (
 
 type launchFunc func(ctx context.Context, model ui.Model, output io.Writer) (ui.Model, error)
 
+type managerController struct {
+	manager *runner.Manager
+}
+
+func (c managerController) Retry(id string) error {
+	return c.manager.Retry(id)
+}
+
+func (c managerController) Cancel() {
+	c.manager.Cancel()
+	c.manager.Wait()
+}
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -75,7 +88,7 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 		manager.Cancel()
 		manager.Wait()
 	}()
-	model := ui.New(tasks, manager, events)
+	model := ui.New(tasks, managerController{manager: manager}, events)
 	finalModel, launchErr := launch(ctx, model, stdout)
 	if launchErr != nil {
 		fmt.Fprintf(stderr, "ua: %v\n", launchErr)

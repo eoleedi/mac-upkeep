@@ -65,7 +65,7 @@ The TUI enters its alternate screen and starts all enabled tasks immediately. A 
 | Up/Down or `j`/`k` | Select a task while the overview is focused. |
 | Enter | Focus the selected task's log. |
 | Escape | Return log focus to the overview. |
-| Page Up/Page Down | Scroll the selected log while the overview is focused. |
+| Page Up/Page Down | Scroll the selected log in overview or log focus. |
 | Up/Down or `j`/`k` | Scroll one line while the log is focused. |
 | `g`/`G` | Jump to the start/end of the selected log. |
 | `r` | Retry the selected failed or canceled task. |

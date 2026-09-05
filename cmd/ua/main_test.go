@@ -142,6 +142,37 @@ command = %q
 	}
 }
 
+func TestUITerminationWaitsForManagerBeforeLauncherReturns(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	stopped := filepath.Join(dir, "stopped")
+	command := fmt.Sprintf("printf started > %q; trap \"sleep 0.05; printf stopped > %q; exit 0\" TERM; while true; do sleep 0.01; done", started, stopped)
+	path := writeCommandConfig(t, fmt.Sprintf(`
+concurrency = 1
+[[tasks]]
+id = "blocking"
+name = "Blocking task"
+command = %q
+`, command))
+	cleanupFinishedBeforeReturn := false
+
+	code := runWithLauncher([]string{"--config", path}, io.Discard, io.Discard, func(_ context.Context, model ui.Model, _ io.Writer) (ui.Model, error) {
+		waitForFile(t, started)
+		updated, cmd := model.Update(ui.TerminateMsg{})
+		assertTeaQuit(t, cmd)
+		_, err := os.Stat(stopped)
+		cleanupFinishedBeforeReturn = err == nil
+		return updated.(ui.Model), nil
+	})
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !cleanupFinishedBeforeReturn {
+		t.Fatal("UI cancellation returned to launcher before manager cleanup completed")
+	}
+}
+
 func TestTerminalTaskStatusesDetermineExitCode(t *testing.T) {
 	tests := map[string]struct {
 		status runner.Status
@@ -229,6 +260,16 @@ func updateTaskStatus(t *testing.T, model ui.Model, taskID string, status runner
 		t.Fatalf("Update returned %T, want ui.Model", updated)
 	}
 	return result
+}
+
+func assertTeaQuit(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("command = nil, want tea.Quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("command returned %T, want tea.QuitMsg", cmd())
+	}
 }
 
 func waitForFile(t *testing.T, path string) {

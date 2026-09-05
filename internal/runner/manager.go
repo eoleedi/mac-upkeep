@@ -164,6 +164,8 @@ func (m *Manager) coordinate(ctx context.Context) {
 					continue
 				}
 				run.result = Result{}
+				run.status = Queued
+				m.emit(ctx, Event{TaskID: run.task.ID, Status: Queued})
 				if err := m.checkRequirements(run.task); err != nil {
 					run.status = Unavailable
 					run.result.Err = err
@@ -171,9 +173,7 @@ func (m *Manager) coordinate(ctx context.Context) {
 					command.response <- nil
 					continue
 				}
-				run.status = Queued
 				queue = append(queue, run)
-				m.emit(ctx, Event{TaskID: run.task.ID, Status: Queued})
 				startAvailable()
 				command.response <- nil
 			}

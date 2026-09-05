@@ -322,13 +322,14 @@ func TestBlockingRetryDoesNotBlockUpdateAndReturnsTaskScopedResult(t *testing.T)
 	}
 }
 
-func TestAcceptedRetryQueuedEventClearsOldState(t *testing.T) {
+func TestUnavailableRetryClearsOldState(t *testing.T) {
 	model := newTestModel(t, []runner.Task{{ID: "a", Name: "Alpha"}})
 	model = updateModel(t, model, runner.Event{TaskID: "a", Output: "old log\n"})
 	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Failed, ExitCode: 7, Err: errors.New("failed"), At: time.Unix(20, 0)})
 	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Queued, At: time.Unix(30, 0)})
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Unavailable, Err: errors.New("missing tool"), At: time.Unix(31, 0)})
 	task := model.tasks[0]
-	if task.Log != "" || task.ExitCode != 0 || task.Err != nil || !task.StartedAt.IsZero() || !task.EndedAt.IsZero() {
+	if task.Status != runner.Unavailable || task.Log != "" || task.ExitCode != 0 || task.Err == nil || !task.StartedAt.IsZero() || task.EndedAt != time.Unix(31, 0) {
 		t.Fatalf("retry did not clear old state: %+v", task)
 	}
 }
