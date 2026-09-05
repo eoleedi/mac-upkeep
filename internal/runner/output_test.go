@@ -11,6 +11,7 @@ func TestNormalizerAppend(t *testing.T) {
 		{"newline commits progress", "downloading 80%", "\ndone\n", "downloading 80%\ndone\n"},
 		{"strip cursor control", "", "safe\x1b[2Jtext", "safetext"},
 		{"retain sgr color", "", "\x1b[32mok\x1b[0m", "\x1b[32mok\x1b[0m"},
+		{"retain colon truecolor", "", "\x1b[38:2::18:171:239mcolor\x1b[0m", "\x1b[38:2::18:171:239mcolor\x1b[0m"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

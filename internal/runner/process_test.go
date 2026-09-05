@@ -37,6 +37,43 @@ func TestShellExecutorReportsExitCode(t *testing.T) {
 	}
 }
 
+func TestShellExecutorProvidesColorTTYWithoutInteractiveInput(t *testing.T) {
+	command := `
+if [[ ! -t 1 || ! -t 2 || -t 0 ]]; then
+  exit 9
+fi
+if read -r value; then
+  exit 10
+fi
+printf '\033[31mbasic\033[0m \033[38;5;196m256\033[0m \033[38;2;18;171;239mtruecolor\033[0m\n'
+`
+	var output safeBuffer
+	result := NewShellExecutor(2*time.Second).Run(context.Background(), Task{Command: command}, &output)
+	if result.ExitCode != 0 || result.Err != nil {
+		t.Fatalf("result = %#v, want colored output TTY with non-TTY input", result)
+	}
+	for _, want := range []string{
+		"\x1b[31mbasic\x1b[0m",
+		"\x1b[38;5;196m256\x1b[0m",
+		"\x1b[38;2;18;171;239mtruecolor\x1b[0m",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output %q missing %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellExecutorPreservesDestinationEIO(t *testing.T) {
+	result := NewShellExecutor(2*time.Second).Run(
+		context.Background(),
+		Task{Command: "printf output"},
+		writerFunc(func([]byte) (int, error) { return 0, syscall.EIO }),
+	)
+	if !errors.Is(result.Err, syscall.EIO) {
+		t.Fatalf("result = %#v, want destination EIO", result)
+	}
+}
+
 func TestColorEnvironmentAddsDefaultsWithoutOverwritingUserValues(t *testing.T) {
 	got := environmentMap(colorEnvironment([]string{
 		"PATH=/usr/bin:/bin",

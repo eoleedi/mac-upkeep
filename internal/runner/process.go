@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 type ShellExecutor struct {
@@ -23,19 +25,43 @@ func NewShellExecutor(grace time.Duration) *ShellExecutor {
 
 func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Result {
 	output = &synchronizedWriter{writer: output}
+	terminal, childTerminal, err := pty.Open()
+	if err != nil {
+		return Result{ExitCode: -1, Err: err}
+	}
+	defer terminal.Close()
+	defer childTerminal.Close()
+	if err := pty.Setsize(terminal, &pty.Winsize{Rows: 40, Cols: 120}); err != nil {
+		return Result{ExitCode: -1, Err: err}
+	}
+
 	cmd := exec.Command("/bin/zsh", "-lc", task.Command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = colorEnvironment(os.Environ())
-	cmd.Stdout = output
-	cmd.Stderr = output
+	cmd.Stdout = childTerminal
+	cmd.Stderr = childTerminal
 
 	if err := cmd.Start(); err != nil {
 		return Result{ExitCode: -1, Err: err}
 	}
+	_ = childTerminal.Close()
+
+	copied := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(output, ptyEOFReader{Reader: terminal})
+		if err != nil {
+			_ = terminal.Close()
+		}
+		copied <- err
+	}()
 
 	waited := make(chan error, 1)
 	go func() {
-		waited <- cmd.Wait()
+		waitErr := cmd.Wait()
+		if copyErr := <-copied; waitErr == nil && copyErr != nil {
+			waitErr = copyErr
+		}
+		waited <- waitErr
 	}()
 
 	select {
@@ -44,6 +70,18 @@ func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Re
 	case <-ctx.Done():
 		return e.cancel(cmd.Process.Pid, waited)
 	}
+}
+
+type ptyEOFReader struct {
+	io.Reader
+}
+
+func (r ptyEOFReader) Read(buffer []byte) (int, error) {
+	n, err := r.Reader.Read(buffer)
+	if errors.Is(err, syscall.EIO) {
+		err = io.EOF
+	}
+	return n, err
 }
 
 func colorEnvironment(environment []string) []string {

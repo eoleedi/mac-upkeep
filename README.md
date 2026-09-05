@@ -78,7 +78,7 @@ The TUI enters its alternate screen and starts all enabled tasks immediately. A 
 
 Logs follow new output until you scroll upward. Moving to the bottom resumes following. Once every task is terminal, the TUI remains open for log review or retries.
 
-`ua` requests color from child commands with the conventional `CLICOLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`, and `HOMEBREW_COLOR` environment variables. Existing values are preserved, so setting `FORCE_COLOR=0 ua` disables force-color behavior for tools that honor it. Safe ANSI text colors are rendered in the log pane; cursor-control sequences are removed to protect the TUI layout.
+`ua` attaches child stdout and stderr to an output-only pseudo-terminal, so commands emit the same native colors they use in a standard shell while stdin remains non-interactive. It also requests color with the conventional `CLICOLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`, and `HOMEBREW_COLOR` environment variables. Existing values are preserved, so setting `FORCE_COLOR=0 ua` disables force-color behavior for tools that honor it. Safe ANSI styles, including basic, 256-color, and truecolor SGR sequences, are rendered in the log pane; cursor-control sequences are removed to protect the TUI layout.
 
 ## Status And Exit Codes
 

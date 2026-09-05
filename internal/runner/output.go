@@ -130,7 +130,7 @@ func parseEscape(input []byte) (consumed int, keep, complete bool) {
 
 func validSGRParameters(parameters []byte) bool {
 	for _, b := range parameters {
-		if (b < '0' || b > '9') && b != ';' {
+		if (b < '0' || b > '9') && b != ';' && b != ':' {
 			return false
 		}
 	}
