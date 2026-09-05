@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +25,7 @@ func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Re
 	output = &synchronizedWriter{writer: output}
 	cmd := exec.Command("/bin/zsh", "-lc", task.Command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = colorEnvironment(os.Environ())
 	cmd.Stdout = output
 	cmd.Stderr = output
 
@@ -41,6 +44,31 @@ func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Re
 	case <-ctx.Done():
 		return e.cancel(cmd.Process.Pid, waited)
 	}
+}
+
+func colorEnvironment(environment []string) []string {
+	result := append([]string(nil), environment...)
+	present := make(map[string]bool, len(environment))
+	for _, entry := range environment {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok {
+			present[name] = true
+		}
+	}
+	defaults := []string{
+		"CLICOLOR=1",
+		"CLICOLOR_FORCE=1",
+		"FORCE_COLOR=1",
+		"HOMEBREW_COLOR=1",
+		"TERM=xterm-256color",
+	}
+	for _, entry := range defaults {
+		name, _, _ := strings.Cut(entry, "=")
+		if !present[name] {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 func (e *ShellExecutor) cancel(pid int, waited <-chan error) Result {

@@ -37,6 +37,42 @@ func TestShellExecutorReportsExitCode(t *testing.T) {
 	}
 }
 
+func TestColorEnvironmentAddsDefaultsWithoutOverwritingUserValues(t *testing.T) {
+	got := environmentMap(colorEnvironment([]string{
+		"PATH=/usr/bin:/bin",
+		"FORCE_COLOR=0",
+		"TERM=screen-256color",
+	}))
+	want := map[string]string{
+		"CLICOLOR":       "1",
+		"CLICOLOR_FORCE": "1",
+		"FORCE_COLOR":    "0",
+		"HOMEBREW_COLOR": "1",
+		"TERM":           "screen-256color",
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Errorf("%s = %q, want %q", name, got[name], value)
+		}
+	}
+
+	defaults := environmentMap(colorEnvironment(nil))
+	if defaults["TERM"] != "xterm-256color" {
+		t.Fatalf("default TERM = %q, want xterm-256color", defaults["TERM"])
+	}
+}
+
+func environmentMap(environment []string) map[string]string {
+	result := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			result[name] = value
+		}
+	}
+	return result
+}
+
 func TestShellExecutorSerializesConcurrentOutput(t *testing.T) {
 	script := writeScript(t, `
 for stream in stdout stderr; do
