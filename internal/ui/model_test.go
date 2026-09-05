@@ -26,6 +26,20 @@ func (c *fakeController) Retry(id string) error {
 
 func (c *fakeController) Cancel() { c.cancels++ }
 
+type blockingController struct {
+	started chan string
+	release chan struct{}
+	err     error
+}
+
+func (c *blockingController) Retry(id string) error {
+	c.started <- id
+	<-c.release
+	return c.err
+}
+
+func (c *blockingController) Cancel() {}
+
 func newTestModel(t *testing.T, tasks []runner.Task) Model {
 	t.Helper()
 	model := New(tasks, &fakeController{}, make(chan runner.Event, 16))
@@ -108,8 +122,22 @@ func TestModelUpdatesStatusAndLogFromEvents(t *testing.T) {
 	if !strings.Contains(view, "Homebrew") || !strings.Contains(view, "upgrading") || !strings.Contains(view, "RUNNING") {
 		t.Fatalf("view missing state:\n%s", view)
 	}
-	if strings.Contains(view, "old progress") || model.tasks[1].Status != "" || model.tasks[1].Log != "" {
+	if strings.Contains(view, "old progress") || model.tasks[1].Status != runner.Queued || model.tasks[1].Log != "" {
 		t.Fatalf("event was not normalized or changed another task:\n%s", view)
+	}
+}
+
+func TestNewTasksStartQueuedAndStartupQuitConfirms(t *testing.T) {
+	model := newTestModel(t, []runner.Task{{ID: "a", Name: "Alpha"}, {ID: "b", Name: "Beta"}})
+	if model.tasks[0].Status != runner.Queued || model.tasks[1].Status != runner.Queued {
+		t.Fatalf("initial statuses = %q, %q; want queued", model.tasks[0].Status, model.tasks[1].Status)
+	}
+	if view := model.View(); strings.Contains(view, "UNKNOWN") || !strings.Contains(view, "Q:2") {
+		t.Fatalf("startup view has an extra state or wrong queue count:\n%s", view)
+	}
+	model = press(t, model, "q")
+	if !model.confirmingQuit {
+		t.Fatal("startup q bypassed cancellation confirmation")
 	}
 }
 
@@ -204,8 +232,15 @@ func TestRetryOnlyDispatchesForFailedOrCanceledTasks(t *testing.T) {
 			controller := &fakeController{}
 			model := New([]runner.Task{{ID: "a", Name: "Alpha"}}, controller, make(chan runner.Event, 1))
 			model = updateModel(t, model, runner.Event{TaskID: "a", Status: status})
-			model = press(t, model, "r")
+			var cmd tea.Cmd
+			model, cmd = pressWithCommand(t, model, "r")
 			want := status == runner.Failed || status == runner.Canceled
+			if (cmd != nil) != want {
+				t.Fatalf("retry command present=%v, want %v", cmd != nil, want)
+			}
+			if cmd != nil {
+				model = updateModel(t, model, cmd())
+			}
 			if got := len(controller.retries) == 1; got != want {
 				t.Fatalf("retry dispatched=%v, want %v", got, want)
 			}
@@ -217,9 +252,73 @@ func TestRetryErrorIsVisible(t *testing.T) {
 	controller := &fakeController{retryErr: errors.New("retry unavailable")}
 	model := New([]runner.Task{{ID: "a", Name: "Alpha"}}, controller, make(chan runner.Event, 1))
 	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Failed})
-	model = press(t, model, "r")
+	var cmd tea.Cmd
+	model, cmd = pressWithCommand(t, model, "r")
+	if cmd == nil {
+		t.Fatal("failed task retry did not return a command")
+	}
+	model = updateModel(t, model, cmd())
 	if !strings.Contains(model.View(), "retry unavailable") {
 		t.Fatalf("retry error not visible:\n%s", model.View())
+	}
+}
+
+func TestBlockingRetryDoesNotBlockUpdateAndReturnsTaskScopedResult(t *testing.T) {
+	controller := &blockingController{
+		started: make(chan string, 1),
+		release: make(chan struct{}),
+		err:     errors.New("retry blocked"),
+	}
+	model := New([]runner.Task{{ID: "a", Name: "Alpha"}, {ID: "b", Name: "Beta"}}, controller, make(chan runner.Event, 1))
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Failed})
+	model = updateModel(t, model, runner.Event{TaskID: "b", Status: runner.Failed})
+
+	type updateResult struct {
+		model Model
+		cmd   tea.Cmd
+	}
+	updated := make(chan updateResult, 1)
+	go func() {
+		next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+		updated <- updateResult{model: next.(Model), cmd: cmd}
+	}()
+
+	var result updateResult
+	select {
+	case result = <-updated:
+	case <-time.After(250 * time.Millisecond):
+		close(controller.release)
+		t.Fatal("Update blocked on Controller.Retry")
+	}
+	if result.cmd == nil {
+		t.Fatal("retry did not return an asynchronous command")
+	}
+
+	retryResult := make(chan tea.Msg, 1)
+	go func() { retryResult <- result.cmd() }()
+	if id := <-controller.started; id != "a" {
+		t.Fatalf("retry task ID = %q, want a", id)
+	}
+	select {
+	case <-retryResult:
+		t.Fatal("retry command completed before controller was released")
+	default:
+	}
+	close(controller.release)
+	result.model = updateModel(t, result.model, <-retryResult)
+
+	result.model = press(t, result.model, "down")
+	view := result.model.View()
+	if !strings.Contains(lineContaining(view, "Alpha"), "retry blocked") || strings.Contains(lineContaining(view, "Beta"), "retry blocked") {
+		t.Fatalf("task a retry error was not associated with task a:\n%s", view)
+	}
+	result.model = press(t, result.model, "up")
+	if !strings.Contains(result.model.View(), "retry blocked") {
+		t.Fatalf("task a retry error was not stored on task a:\n%s", result.model.View())
+	}
+	result.model = updateModel(t, result.model, runner.Event{TaskID: "a", Status: runner.Queued})
+	if strings.Contains(result.model.View(), "retry blocked") {
+		t.Fatalf("queued retry did not clear task-local error:\n%s", result.model.View())
 	}
 }
 
@@ -245,6 +344,36 @@ func TestTickUpdatesElapsedTimeAndReschedulesWhileActive(t *testing.T) {
 	_, cmd = updateWithCommand(t, model, tickMsg{at: time.Unix(81, 0)})
 	if cmd != nil {
 		t.Fatal("tick rescheduled after all tasks became terminal")
+	}
+}
+
+func TestTickContinuesBeforeInitialRunnerEvents(t *testing.T) {
+	model := newTestModel(t, []runner.Task{{ID: "a", Name: "Alpha"}})
+	_, cmd := updateWithCommand(t, model, tickMsg{at: time.Unix(1, 0)})
+	if cmd == nil {
+		t.Fatal("tick chain stopped before initial runner events")
+	}
+}
+
+func TestTickRestartsOnceWhenRetryBecomesActive(t *testing.T) {
+	events := make(chan runner.Event, 2)
+	events <- runner.Event{TaskID: "sentinel"}
+	events <- runner.Event{TaskID: "sentinel"}
+	model := New([]runner.Task{{ID: "a", Name: "Alpha"}}, &fakeController{}, events)
+	model = updateModel(t, model, runner.Event{TaskID: "a", Status: runner.Failed})
+	model, cmd := updateWithCommand(t, model, tickMsg{at: time.Unix(1, 0)})
+	if cmd != nil {
+		t.Fatal("inactive tick unexpectedly continued")
+	}
+
+	model, cmd = updateWithCommand(t, model, runner.Event{TaskID: "a", Status: runner.Queued})
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("retry activation command = %T with %d children, want two-command batch", cmd(), len(batch))
+	}
+	_, cmd = updateWithCommand(t, model, runner.Event{TaskID: "a", Status: runner.Running})
+	if _, duplicate := cmd().(tea.BatchMsg); duplicate {
+		t.Fatal("active-to-active transition started a duplicate tick chain")
 	}
 }
 
@@ -374,4 +503,13 @@ func numberedLines(count int) string {
 		fmt.Fprintf(&builder, "line %02d\n", i)
 	}
 	return builder.String()
+}
+
+func lineContaining(value, substring string) string {
+	for _, line := range strings.Split(value, "\n") {
+		if strings.Contains(line, substring) {
+			return line
+		}
+	}
+	return ""
 }

@@ -22,6 +22,11 @@ type tickMsg struct {
 
 type eventChannelClosedMsg struct{}
 
+type retryResultMsg struct {
+	taskID string
+	err    error
+}
+
 type taskView struct {
 	Task       runner.Task
 	Status     runner.Status
@@ -31,6 +36,7 @@ type taskView struct {
 	Err        error
 	StartedAt  time.Time
 	EndedAt    time.Time
+	RetryErr   error
 }
 
 type Model struct {
@@ -47,24 +53,25 @@ type Model struct {
 	controller     Controller
 	events         <-chan runner.Event
 	now            time.Time
-	retryErr       error
+	tickScheduled  bool
 }
 
 func New(tasks []runner.Task, controller Controller, events <-chan runner.Event) Model {
 	views := make([]taskView, len(tasks))
 	for i, task := range tasks {
-		views[i].Task = task
+		views[i] = taskView{Task: task, Status: runner.Queued}
 	}
 
 	return Model{
-		tasks:      views,
-		viewport:   viewport.New(1, 1),
-		followLog:  true,
-		width:      80,
-		height:     24,
-		controller: controller,
-		events:     events,
-		now:        time.Now(),
+		tasks:         views,
+		viewport:      viewport.New(1, 1),
+		followLog:     true,
+		width:         80,
+		height:        24,
+		controller:    controller,
+		events:        events,
+		now:           time.Now(),
+		tickScheduled: true,
 	}
 }
 
@@ -78,14 +85,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.controller.Cancel()
 		return m, tea.Quit
 	case runner.Event:
+		wasActive := m.hasActiveTasks()
 		m.applyEvent(msg)
-		return m, waitForEvent(m.events)
+		eventCmd := waitForEvent(m.events)
+		if !wasActive && m.hasActiveTasks() && !m.tickScheduled {
+			m.tickScheduled = true
+			return m, tea.Batch(eventCmd, tick())
+		}
+		return m, eventCmd
+	case retryResultMsg:
+		m.applyRetryResult(msg)
+		return m, nil
 	case eventChannelClosedMsg:
 		m.events = nil
 		return m, nil
 	case tickMsg:
 		m.now = msg.at
+		m.tickScheduled = false
 		if m.hasActiveTasks() {
+			m.tickScheduled = true
 			return m, tick()
 		}
 		return m, nil
@@ -146,8 +164,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewport()
 		return m, nil
 	case "r":
-		m.retrySelected()
-		return m, nil
+		return m, m.retrySelected()
 	case "pgup":
 		m.viewport.PageUp()
 		m.followLog = false
@@ -205,7 +222,7 @@ func (m *Model) applyEvent(event runner.Event) {
 			task.Err = nil
 			task.StartedAt = time.Time{}
 			task.EndedAt = time.Time{}
-			m.retryErr = nil
+			task.RetryErr = nil
 		}
 		if event.Output != "" {
 			task.Log = task.Normalizer.Append(task.Log, event.Output)
@@ -252,15 +269,28 @@ func (m *Model) selectTask(selected int) {
 	m.refreshViewport()
 }
 
-func (m *Model) retrySelected() {
+func (m *Model) retrySelected() tea.Cmd {
 	if len(m.tasks) == 0 {
-		return
+		return nil
 	}
-	task := m.tasks[m.selected]
+	task := &m.tasks[m.selected]
 	if task.Status != runner.Failed && task.Status != runner.Canceled {
-		return
+		return nil
 	}
-	m.retryErr = m.controller.Retry(task.Task.ID)
+	task.RetryErr = nil
+	taskID := task.Task.ID
+	return func() tea.Msg {
+		return retryResultMsg{taskID: taskID, err: m.controller.Retry(taskID)}
+	}
+}
+
+func (m *Model) applyRetryResult(result retryResultMsg) {
+	for i := range m.tasks {
+		if m.tasks[i].Task.ID == result.taskID {
+			m.tasks[i].RetryErr = result.err
+			return
+		}
+	}
 }
 
 func (m Model) hasActiveTasks() bool {

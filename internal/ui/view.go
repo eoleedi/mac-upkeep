@@ -70,8 +70,8 @@ func (m Model) overviewView() []string {
 		if detail := failureDetail(task); detail != "" {
 			row += "  " + detail
 		}
-		if i == m.selected && m.retryErr != nil {
-			row += "  retry: " + m.retryErr.Error()
+		if task.RetryErr != nil {
+			row += "  retry: " + task.RetryErr.Error()
 		}
 		if i == m.selected {
 			row = lipgloss.NewStyle().Bold(true).Render(row)
@@ -85,15 +85,14 @@ func (m Model) logView() []string {
 	innerWidth := max(1, m.width-2)
 	focus := "OVERVIEW FOCUS"
 	name := "No tasks"
-	status := "UNKNOWN"
 	if m.focusLog {
 		focus = "LOG FOCUS"
 	}
+	title := fmt.Sprintf(" LOG: %s | %s ", name, focus)
 	if len(m.tasks) > 0 {
 		name = m.tasks[m.selected].Task.Name
-		status = statusLabel(m.tasks[m.selected].Status)
+		title = fmt.Sprintf(" LOG: %s | %s | %s ", name, statusLabel(m.tasks[m.selected].Status), focus)
 	}
-	title := fmt.Sprintf(" LOG: %s | %s | %s ", name, status, focus)
 	top := "+" + ansi.Truncate(title+strings.Repeat("-", innerWidth), innerWidth, "") + "+"
 	content := strings.Split(m.viewport.View(), "\n")
 	if len(content) > m.viewport.Height {
@@ -197,15 +196,14 @@ func statusMarker(status runner.Status) string {
 		return "[x]"
 	case runner.Canceled:
 		return "[-]"
-	default:
+	case runner.Unavailable:
 		return "[?]"
+	default:
+		return "[ ]"
 	}
 }
 
 func statusLabel(status runner.Status) string {
-	if status == "" {
-		return "UNKNOWN"
-	}
 	return strings.ToUpper(string(status))
 }
 
