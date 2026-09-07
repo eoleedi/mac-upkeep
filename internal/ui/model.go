@@ -6,7 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/eoleedi/ua/internal/runner"
+	"github.com/eoleedi/mac-upkeep/internal/runner"
 )
 
 type Controller interface {

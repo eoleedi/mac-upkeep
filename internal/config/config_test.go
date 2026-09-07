@@ -202,7 +202,7 @@ func TestDefaultPathUsesHomeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(os.Getenv("HOME"), ".config", "ua", "config.toml"); got != want {
+	if want := filepath.Join(os.Getenv("HOME"), ".config", "mac-upkeep", "config.toml"); got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
 }

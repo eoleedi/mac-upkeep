@@ -1,4 +1,4 @@
-module github.com/eoleedi/ua
+module github.com/eoleedi/mac-upkeep
 
 go 1.27.1
 

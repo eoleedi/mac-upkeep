@@ -42,7 +42,7 @@ func DefaultPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("home directory: %w", err)
 	}
-	return filepath.Join(home, ".config", "ua", "config.toml"), nil
+	return filepath.Join(home, ".config", "mac-upkeep", "config.toml"), nil
 }
 
 func Load(path string) (Config, error) {

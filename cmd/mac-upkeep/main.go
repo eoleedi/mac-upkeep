@@ -14,9 +14,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/eoleedi/ua/internal/config"
-	"github.com/eoleedi/ua/internal/runner"
-	"github.com/eoleedi/ua/internal/ui"
+	"github.com/eoleedi/mac-upkeep/internal/config"
+	"github.com/eoleedi/mac-upkeep/internal/runner"
+	"github.com/eoleedi/mac-upkeep/internal/ui"
 )
 
 type launchFunc func(ctx context.Context, model ui.Model, output io.Writer, cleanup func()) (ui.Model, error)
@@ -56,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc) (exitCode int) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			fmt.Fprintf(stderr, "ua: UI panic: %v\n", recovered)
+			fmt.Fprintf(stderr, "mac-upkeep: UI panic: %v\n", recovered)
 			exitCode = 2
 		}
 	}()
@@ -67,7 +67,7 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "ua: unexpected argument %q\n", flags.Arg(0))
+		fmt.Fprintf(stderr, "mac-upkeep: unexpected argument %q\n", flags.Arg(0))
 		flags.Usage()
 		return 2
 	}
@@ -75,14 +75,14 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 	if *configPath == "" {
 		path, err := config.DefaultPath()
 		if err != nil {
-			fmt.Fprintf(stderr, "ua: %v\n", err)
+			fmt.Fprintf(stderr, "mac-upkeep: %v\n", err)
 			return 2
 		}
 		*configPath = path
 	}
 	loaded, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "ua: %v\n", err)
+		fmt.Fprintf(stderr, "mac-upkeep: %v\n", err)
 		return 2
 	}
 
@@ -113,7 +113,7 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 	model := ui.New(tasks, managerController{manager: manager}, events)
 	finalModel, launchErr := launch(ctx, model, stdout, cleanup)
 	if launchErr != nil {
-		fmt.Fprintf(stderr, "ua: %v\n", launchErr)
+		fmt.Fprintf(stderr, "mac-upkeep: %v\n", launchErr)
 		return 2
 	}
 	return finalModel.ExitCode()

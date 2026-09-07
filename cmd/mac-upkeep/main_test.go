@@ -15,8 +15,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/eoleedi/ua/internal/runner"
-	"github.com/eoleedi/ua/internal/ui"
+	"github.com/eoleedi/mac-upkeep/internal/runner"
+	"github.com/eoleedi/mac-upkeep/internal/ui"
 )
 
 func TestMissingConfigReturnsStartupErrorWithoutLaunching(t *testing.T) {
@@ -26,7 +26,7 @@ func TestMissingConfigReturnsStartupErrorWithoutLaunching(t *testing.T) {
 	}{
 		"default": {
 			args:     func(string) []string { return nil },
-			wantPath: func(home string) string { return filepath.Join(home, ".config", "ua", "config.toml") },
+			wantPath: func(home string) string { return filepath.Join(home, ".config", "mac-upkeep", "config.toml") },
 		},
 		"explicit": {
 			args:     func(home string) []string { return []string{"--config", filepath.Join(home, "missing.toml")} },

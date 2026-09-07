@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/eoleedi/ua/internal/runner"
+	"github.com/eoleedi/mac-upkeep/internal/runner"
 )
 
 var statusStyles = map[runner.Status]lipgloss.Style{
@@ -43,7 +43,7 @@ func (m Model) headerView() string {
 	for _, task := range m.tasks {
 		counts[task.Status]++
 	}
-	header := fmt.Sprintf("UPDATE ALL  Q:%d R:%d OK:%d FAIL:%d CANCEL:%d N/A:%d",
+	header := fmt.Sprintf("MAC UPKEEP  Q:%d R:%d OK:%d FAIL:%d CANCEL:%d N/A:%d",
 		counts[runner.Queued], counts[runner.Running], counts[runner.Succeeded],
 		counts[runner.Failed], counts[runner.Canceled], counts[runner.Unavailable])
 	return lipgloss.NewStyle().Bold(true).Render(header)
