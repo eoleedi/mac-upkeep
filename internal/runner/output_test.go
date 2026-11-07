@@ -74,3 +74,60 @@ func TestNormalizerDropsOSCAndUnsafeControls(t *testing.T) {
 		t.Fatalf("Append() = %q, want %q", got, "abc\tline\n")
 	}
 }
+
+func TestNormalizerHomebrewProgressRedraws(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{
+			name: "single download uses cursor horizontal absolute",
+			input: "Starting\r\n⠲ Cask docker-desktop Extracting 572.7MB\x1b[K\x1b[0G" +
+				"⠳ Cask docker-desktop Extracting 572.7MB\x1b[K\x1b[0G" +
+				"✔ Cask docker-desktop Extracted\x1b[K\r\nDone\r\n",
+			want: "Starting\n✔ Cask docker-desktop Extracted\nDone\n",
+		},
+		{
+			name: "multiple downloads use cursor previous line",
+			input: "Starting\r\n⠲ Cask docker-desktop 10%\x1b[K\r\n⠲ Bottle other 20%\x1b[K\x1b[1F" +
+				"⠳ Cask docker-desktop 80%\x1b[K\r\n⠳ Bottle other 90%\x1b[K\x1b[1F" +
+				"✔ Cask docker-desktop done\x1b[K\r\n✔ Bottle other done\x1b[K\r\n",
+			want: "Starting\n✔ Cask docker-desktop done\n✔ Bottle other done\n",
+		},
+		{
+			name:  "cursor up and carriage return",
+			input: "Header\nold progress\n\x1b[A\rnew\x1b[K\nDone\n",
+			want:  "Header\nnew\nDone\n",
+		},
+		{
+			name:  "screen erase removes stale progress rows",
+			input: "Header\nfirst\nsecond\x1b[1F\x1b[Jlast\n",
+			want:  "Header\nlast\n",
+		},
+		{
+			name:  "final cursor reset preserves progress and color",
+			input: "\x1b[32m⠲ Download 10%\x1b[0m\x1b[1G\x1b[32m✔ Done\x1b[0m\x1b[K\x1b[0G",
+			want:  "\x1b[32m✔ Done\x1b[0m",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A PTY read can split a redraw anywhere, including inside a rune or CSI.
+			for split := 0; split <= len(tt.input); split++ {
+				var normalizer Normalizer
+				got := normalizer.Append("", tt.input[:split])
+				got = normalizer.Append(got, tt.input[split:])
+				if got = normalizer.Flush(got); got != tt.want {
+					t.Fatalf("split %d: got %q, want %q", split, got, tt.want)
+				}
+			}
+			var normalizer Normalizer
+			var got string
+			for i := range len(tt.input) {
+				got = normalizer.Append(got, tt.input[i:i+1])
+			}
+			if got = normalizer.Flush(got); got != tt.want {
+				t.Fatalf("byte-at-a-time: got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
