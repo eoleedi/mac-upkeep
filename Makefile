@@ -1,7 +1,9 @@
 .PHONY: build test test-install install-files install
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 build:
-	go build -o bin/mac-upkeep ./cmd/mac-upkeep
+	go build -ldflags "-X main.version=$(VERSION)" -o bin/mac-upkeep ./cmd/mac-upkeep
 
 test:
 	go test -race ./...

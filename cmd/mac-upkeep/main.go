@@ -23,6 +23,9 @@ type launchFunc func(ctx context.Context, model ui.Model, output io.Writer, clea
 
 var terminationSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 const (
 	enterAltScreen = "\x1b[?1049h"
 	exitAltScreen  = "\x1b[?1049l"
@@ -60,9 +63,10 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 			exitCode = 2
 		}
 	}()
-	flags := flag.NewFlagSet("ua", flag.ContinueOnError)
+	flags := flag.NewFlagSet("mac-upkeep", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to configuration file")
+	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -70,6 +74,11 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 		fmt.Fprintf(stderr, "mac-upkeep: unexpected argument %q\n", flags.Arg(0))
 		flags.Usage()
 		return 2
+	}
+
+	if *showVersion {
+		fmt.Fprintf(stdout, "mac-upkeep %s\n", version)
+		return 0
 	}
 
 	if *configPath == "" {

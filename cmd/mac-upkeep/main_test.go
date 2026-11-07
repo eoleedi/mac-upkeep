@@ -19,6 +19,28 @@ import (
 	"github.com/eoleedi/mac-upkeep/internal/ui"
 )
 
+func TestVersionWithoutLaunching(t *testing.T) {
+	previous := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = previous })
+	for _, args := range [][]string{
+		{"--version"},
+		{"--version", "--config", filepath.Join(t.TempDir(), "missing.toml")},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			var stdout, stderr bytes.Buffer
+			code := runWithLauncher(args, &stdout, &stderr, func(context.Context, ui.Model, io.Writer, func()) (ui.Model, error) {
+				t.Fatal("version flag launched the UI")
+				return ui.Model{}, nil
+			})
+			if code != 0 || stdout.String() != "mac-upkeep v1.2.3\n" || stderr.Len() != 0 {
+				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestMissingConfigReturnsStartupErrorWithoutLaunching(t *testing.T) {
 	tests := map[string]struct {
 		args     func(string) []string

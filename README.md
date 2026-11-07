@@ -28,6 +28,14 @@ Ensure `~/.local/bin` is on `PATH`, then run:
 mac-upkeep
 ```
 
+Print the installed build version without starting tasks:
+
+```sh
+mac-upkeep --version
+```
+
+`make build` embeds the Git tag or revision (with `-dirty` for local changes). Override it for a release with `make build VERSION=v1.0.0`; direct `go build` builds report `dev`.
+
 ## Configuration
 
 The default configuration path is `~/.config/mac-upkeep/config.toml`. Use another file with `mac-upkeep --config /path/to/config.toml`.
