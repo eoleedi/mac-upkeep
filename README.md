@@ -1,46 +1,49 @@
 # Mac Upkeep
 
-`mac-upkeep` is a terminal interface for running a configured set of macOS maintenance commands concurrently. It starts enabled tasks immediately, keeps each task's live log available, and reports an aggregate result when you quit.
+Run macOS maintenance commands concurrently in a terminal interface with live logs, cancellation, and retries.
 
 ## Prerequisites
 
 - macOS
-- Go 1.27 for source builds
+- [Homebrew](https://brew.sh)
 - Zsh
 - Each package manager or executable required by an enabled task
 
-The example configuration includes Homebrew, Conda, ruby-install, npm, `mas`, Poetry, Oh My Zsh, and `npx skills`. Disable tasks whose requirements are unavailable before running `mac-upkeep`.
+## Install With Homebrew
 
-## Build And Install
-
-Run the automated checks and install the binary:
+Install from the tap and check the installed version:
 
 ```sh
-make test
-make install
+brew install eoleedi/tap/mac-upkeep
+mac-upkeep --version
 ```
 
-Installation writes the binary to `~/.local/bin/mac-upkeep`. It migrates `~/.config/ua/config.toml` when the new config is absent, or creates `~/.config/mac-upkeep/config.toml` from `config.example.toml`; existing local configuration is never overwritten.
+Homebrew does not create or modify your configuration. Copy the example without overwriting an existing file:
 
-Ensure `~/.local/bin` is on `PATH`, then run:
+```sh
+mkdir -p ~/.config/mac-upkeep
+cp -n "$(brew --prefix mac-upkeep)/share/mac-upkeep/config.example.toml" \
+  ~/.config/mac-upkeep/config.toml
+```
+
+Review `~/.config/mac-upkeep/config.toml` and disable unwanted or unavailable tasks before running—enabled tasks start immediately. Install each task's required package manager separately.
 
 ```sh
 mac-upkeep
 ```
 
-Print the installed build version without starting tasks:
+To upgrade:
 
 ```sh
-mac-upkeep --version
+brew update
+brew upgrade eoleedi/tap/mac-upkeep
 ```
-
-`make build` embeds the Git tag or revision (with `-dirty` for local changes). Override it for a release with `make build VERSION=v1.0.0`; direct `go build` builds report `dev`.
 
 ## Configuration
 
 The default configuration path is `~/.config/mac-upkeep/config.toml`. Use another file with `mac-upkeep --config /path/to/config.toml`.
 
-The global `concurrency` value must be at least `1` and defaults to `3` when omitted. Tasks run in configuration order, with no more than `concurrency` commands active at once. Each task uses this schema:
+Set `concurrency` to the maximum number of simultaneous tasks (default: `3`, minimum: `1`). Add tasks as follows:
 
 ```toml
 [[tasks]]
@@ -48,21 +51,10 @@ id = "homebrew"          # unique, non-empty identifier
 name = "Homebrew"        # non-empty display name
 command = "brew upgrade" # executed by /bin/zsh -lc
 enabled = true            # optional; defaults to true when omitted
-requires = ["brew"]       # optional executable names checked on PATH
+requires = ["brew"]       # optional requirements
 ```
 
-Disabled tasks remain in the file but do not participate in a run. To disable an unavailable updater, add `enabled = false` to its task entry:
-
-```toml
-[[tasks]]
-id = "conda"
-name = "Conda"
-command = "conda update conda python --all -y"
-requires = ["conda"]
-enabled = false
-```
-
-The TUI enters its alternate screen and starts all enabled tasks immediately. A completed task frees its concurrency slot for the next queued task; one failure does not stop unrelated tasks.
+Set `enabled = false` to skip a task. One task's failure does not stop the others.
 
 > **Warning:** The example Oh My Zsh task sources `~/.zshrc` before calling its update functions. Review that file and the command before enabling the task.
 
@@ -70,55 +62,22 @@ The TUI enters its alternate screen and starts all enabled tasks immediately. A 
 
 | Key | Action |
 | --- | --- |
-| Up/Down or `j`/`k` | Select a task while the overview is focused. |
+| Up/Down or `j`/`k` | Select a task or scroll its focused log. |
 | Enter | Focus the selected task's log. |
 | Escape | Return log focus to the overview. |
 | Page Up/Page Down | Scroll the selected log in overview or log focus. |
-| Up/Down or `j`/`k` | Scroll one line while the log is focused. |
 | `g`/`G` | Jump to the start/end of the selected log. |
-| `c` | Cancel only the selected running task; the other tasks and manager keep running. |
+| `c` | Cancel the selected running task. |
 | `r` | Retry the selected failed or canceled task. |
 | `q` or Ctrl-C | Quit when idle; request confirmation while tasks are active. |
 | `y` | Confirm cancellation. |
 | `n` or Escape | Dismiss cancellation. |
-| `q` or Ctrl-C at confirmation | Confirm cancellation immediately. |
 | `?` | Toggle concise key help. |
 
 Logs follow new output until you scroll upward. Moving to the bottom resumes following. Once every task is terminal, the TUI remains open for log review or retries.
 
-`mac-upkeep` attaches child stdout and stderr to an output-only pseudo-terminal, so commands emit the same native colors they use in a standard shell while stdin remains non-interactive. It also requests color with the conventional `CLICOLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`, and `HOMEBREW_COLOR` environment variables. Existing values are preserved, so setting `FORCE_COLOR=0 mac-upkeep` disables force-color behavior for tools that honor it. Safe ANSI styles, including basic, 256-color, and truecolor SGR sequences, are rendered in the log pane; cursor-control sequences are removed to protect the TUI layout.
+## Exit Codes
 
-## Status And Exit Codes
-
-Tasks move through these states:
-
-| Status | Meaning |
-| --- | --- |
-| `queued` | Waiting for a concurrency slot. |
-| `running` | The command is active. |
-| `succeeded` | The command exited with status `0`. |
-| `failed` | The command exited nonzero or could not start. |
-| `canceled` | The task was stopped individually or by application cancellation. |
-| `unavailable` | A declared requirement was not found on `PATH`. |
-
-The final process exit code is `0` only when every enabled task's latest result is `succeeded`. It is `1` if any enabled task is failed, canceled, unavailable, or otherwise incomplete. Startup, configuration, flag, and UI errors return `2`.
-
-## Retry And Cancellation
-
-Press `c` on a running task to stop only that task's process group while the remaining queue continues. The task becomes canceled after process cleanup finishes. Press `r` on a failed or canceled task to clear its old log and timing data, recheck requirements, and queue it under the same concurrency limit. A task whose requirement is still missing becomes unavailable.
-
-Quitting while work is active requires confirmation. Confirming marks queued tasks canceled and sends `SIGTERM` to every running command's process group. After a two-second grace period, `mac-upkeep` sends `SIGKILL` to any surviving process groups and waits for cleanup before restoring the terminal. At the confirmation prompt, a second `q` or Ctrl-C skips the prompt but still performs managed cleanup.
-
-External SIGINT, SIGTERM, and SIGHUP bypass confirmation and use the same managed cleanup. Bubble Tea's signal handler is disabled so `mac-upkeep` is the sole owner of those signals. Normal cancellation keeps the event loop active until process cleanup completes and every terminal task status has been applied. If Bubble Tea itself returns an unexpected error or recovers a panic, fallback cleanup still completes before `mac-upkeep` leaves its application-owned alternate screen; Bubble Tea may already have restored raw input mode and the cursor internally because its API does not expose a pre-restore error hook.
-
-## Replacing Shell Functions
-
-Do not remove an existing shell implementation until the new binary has passed automated and harmless smoke verification:
-
-1. Run `make test` and `make install`.
-2. Create a temporary configuration containing only harmless commands such as `printf` and `sleep`; do not invoke real updaters during the smoke test.
-3. Run `mac-upkeep --config /path/to/smoke.toml` and verify live output, selection, scrolling, failure and retry, selected-task cancellation and retry, resizing, and confirmed cancellation.
-4. Run `mac-upkeep --config ~/.config/mac-upkeep/config.toml` only after reviewing and enabling the updater tasks you intend to use.
-5. After verification succeeds, replace any old `ua` alias or function with `alias ua='mac-upkeep'` in `~/.zshrc`.
-
-The `ua` alias is a convenience shortcut; `mac-upkeep` is the canonical command.
+- `0`: All enabled tasks succeeded.
+- `1`: A task failed, was canceled, was unavailable, or did not finish.
+- `2`: A startup, configuration, flag, or UI error occurred.
