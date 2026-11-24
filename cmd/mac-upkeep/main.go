@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -108,7 +107,7 @@ func runWithLauncher(args []string, stdout, stderr io.Writer, launch launchFunc)
 		})
 	}
 
-	manager := runner.NewManager(tasks, loaded.Concurrency, runner.NewShellExecutor(2*time.Second), exec.LookPath)
+	manager := runner.NewManager(tasks, loaded.Concurrency, runner.NewShellExecutor(2*time.Second), runner.ShellLookup)
 	ctx := context.Background()
 	events := manager.Start(ctx)
 	var cleanupOnce sync.Once

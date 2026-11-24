@@ -30,6 +30,25 @@ func TestShellExecutorStreamsStdoutAndStderr(t *testing.T) {
 	}
 }
 
+func TestShellLookupFindsShellFunctions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.Mkdir(home+"/.nvm", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(home+"/.nvm/nvm.sh", []byte("nvm() { return 0; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ShellLookup("nvm")
+	if err != nil {
+		t.Fatalf("ShellLookup() error = %v", err)
+	}
+	if !strings.Contains(got, "nvm") {
+		t.Fatalf("ShellLookup() = %q, want nvm function", got)
+	}
+}
+
 func TestShellExecutorReportsExitCode(t *testing.T) {
 	result := NewShellExecutor(2*time.Second).Run(context.Background(), Task{Command: "exit 7"}, io.Discard)
 	if result.ExitCode != 7 || result.Err == nil {

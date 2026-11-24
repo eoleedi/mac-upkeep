@@ -19,6 +19,8 @@ type ShellExecutor struct {
 	signalGroup func(int, syscall.Signal) error
 }
 
+const nvmSetup = `export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"`
+
 func NewShellExecutor(grace time.Duration) *ShellExecutor {
 	return &ShellExecutor{grace: grace, signalGroup: syscall.Kill}
 }
@@ -35,7 +37,7 @@ func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Re
 		return Result{ExitCode: -1, Err: err}
 	}
 
-	cmd := exec.Command("/bin/zsh", "-lc", task.Command)
+	cmd := exec.Command("/bin/zsh", "-lc", nvmSetup+"\n"+task.Command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = colorEnvironment(os.Environ())
 	cmd.Stdout = childTerminal
@@ -70,6 +72,16 @@ func (e *ShellExecutor) Run(ctx context.Context, task Task, output io.Writer) Re
 	case <-ctx.Done():
 		return e.cancel(cmd.Process.Pid, waited)
 	}
+}
+
+// ShellLookup resolves commands and nvm, which is normally defined by nvm.sh.
+func ShellLookup(name string) (string, error) {
+	cmd := exec.Command("/bin/zsh", "-lc", nvmSetup+"\ncommand -v -- \"$1\"", "mac-upkeep-requirement", name)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 type ptyEOFReader struct {
